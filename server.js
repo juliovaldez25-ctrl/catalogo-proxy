@@ -6,7 +6,7 @@ const app = express();
 
 // URL da sua API Supabase
 const SUPABASE_URL = "https://hbpekfnexdtnbahmmufm.supabase.co";
-const SUPABASE_KEY = "chave_anon_public"; // substitua pela sua chave pública anônima
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg5ODU1MTcsImV4cCI6MjA3NDU2MTUxN30.R2eMWKM9naCbNizHzB_W7Uvm8cNpEDukb9mf4wNLt5M"; // substitua pela sua chave pública anônima
 
 app.use(async (req, res, next) => {
   const host = req.headers.host?.replace("www.", "").trim();
