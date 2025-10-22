@@ -52,11 +52,14 @@ app.use(async (req, res, next) => {
         target,
         changeOrigin: true,
         secure: true,
-        pathRewrite: (p) => {
-          if (p.startsWith(`/s/${slug}`)) return p; // já correto
-          if (p === "/") return `/s/${slug}`;
-          return `/s/${slug}${p}`;
-        },
+       pathRewrite: (p) => {
+  // Se a loja já estiver dentro do /s/, não reescreve
+  if (p.startsWith(`/s/`)) return p;
+  
+  // Corrige caminhos com barra dupla e rota base
+  const cleanPath = p === "/" ? "" : p;
+  return `/s/${slug}${cleanPath}`;
+},
         onProxyReq: (proxyReq, req) => {
           console.log(`🛰️ Proxy -> ${target}${req.path}`);
         },
