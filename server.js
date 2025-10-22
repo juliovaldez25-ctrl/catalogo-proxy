@@ -4,89 +4,80 @@ import fetch from "node-fetch";
 
 const app = express();
 
+// ⚙️ Configurações principais
 const SUPABASE_URL = "https://hbpekfnexdtnbahmmufm.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg5ODU1MTcsImV4cCI6MjA3NDU2MTUxN30.R2eMWKM9naCbNizHzB_W7Uvm8cNpEDukb9mf4wNLt5M"; // ou use process.env.SUPABASE_KEY
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg5ODU1MTcsImV4cCI6MjA3NDU2MTUxN30.R2eMWKM9naCbNizHzB_W7Uvm8cNpEDukb9mf4wNLt5M";
+const BASE_TARGET = "https://catalogovirtual.app.br";
 
-// Endpoints úteis
-app.get("/debug", async (req, res) => {
-  const host = req.headers.host?.replace("www.", "").trim();
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}`, {
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+// ⚡ Cache simples em memória
+const domainCache = new Map();
+
+// 🔍 Função para buscar domínio no Supabase
+async function getDomainData(host) {
+  if (domainCache.has(host)) return domainCache.get(host);
+
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=*`, {
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+    },
   });
-  res.json({ host, data: await r.json(), path: req.path, originalUrl: req.originalUrl });
-});
 
-// Quais paths NÃO devem ir para /s/{slug}
-const STATIC_MATCHERS = [
-  /^\/assets\//,
-  /^\/favicon\.ico$/,
-  /^\/site\.webmanifest$/,
-  /^\/robots\.txt$/,
-  /^\/sitemap\.xml$/,
-  /^\/~flock\.js$/,
-  /^\/~api\//,
-];
+  const data = await response.json();
 
-function isStaticPath(pathname) {
-  return STATIC_MATCHERS.some((rx) => rx.test(pathname));
-}
-
-app.use(async (req, res, next) => {
-  const host = req.headers.host?.replace("www.", "").trim();
-  if (!host) return res.status(400).send("Host header missing");
-
-  // Busca o slug no Supabase
-  let slug = null;
-  try {
-    const resp = await fetch(`${SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}`, {
-      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
-    });
-    const data = await resp.json();
-    if (Array.isArray(data) && data.length > 0) {
-      const row = data[0];
-      if (row.status !== "active" && row.status !== "verified") {
-        return res.status(403).send("<h2>Domínio pendente de verificação</h2>");
-      }
-      slug = row.slug;
-    } else {
-      return res.status(404).send("<h1>Domínio não configurado</h1>");
-    }
-  } catch (e) {
-    console.error("Erro consultando Supabase:", e);
-    return res.status(500).send("Erro interno");
+  if (data?.length > 0 && data[0].status === "active") {
+    domainCache.set(host, data[0]);
+    return data[0];
   }
 
-  // Define destino e reescrita de path
-  const TARGET_ORIGIN = "https://catalogovirtual.app.br";
-  const isStatic = isStaticPath(req.path);
+  return null;
+}
 
-  // Para assets: mantém o path exato (/assets/..., /~api/..., favicon, etc.)
-  // Para rotas do app: prefixa /s/{slug}
-  const proxy = createProxyMiddleware({
-    target: TARGET_ORIGIN,
-    changeOrigin: true,
-    secure: true,
-    followRedirects: true,
-    headers: {
-      "X-Forwarded-Host": host,
-      "X-Forwarded-Proto": "https",
-      "User-Agent": req.headers["user-agent"] || "Render-Proxy",
-    },
-    pathRewrite: (path) => {
-      if (isStatic) return path; // ex.: /assets/xxx.js → /assets/xxx.js
-      // ex.: "/" → /s/slug
-      // ex.: "/produto/123" → /s/slug/produto/123
-      if (path === "/") return `/s/${slug}`;
-      return `/s/${slug}${path}`;
-    },
-    onError(err, rq, rs) {
-      console.error("Proxy error:", err.message);
-      rs.status(502).send("<h1>Erro ao carregar a loja</h1>");
-    },
-  });
+// 🧭 Middleware principal
+app.use(async (req, res, next) => {
+  const host = req.headers.host?.replace("www.", "").trim();
+  const path = req.path;
+  console.log(`🌐 Acesso detectado: ${host}${path}`);
 
-  return proxy(req, res, next);
+  try {
+    const domainData = await getDomainData(host);
+
+    if (domainData) {
+      const slug = domainData.slug;
+      const target = BASE_TARGET;
+
+      console.log(`➡️ Redirecionando domínio ${host} -> /s/${slug}${path}`);
+
+      return createProxyMiddleware({
+        target,
+        changeOrigin: true,
+        secure: true,
+        pathRewrite: (p) => {
+          if (p.startsWith(`/s/${slug}`)) return p; // já correto
+          if (p === "/") return `/s/${slug}`;
+          return `/s/${slug}${p}`;
+        },
+        onProxyReq: (proxyReq, req) => {
+          console.log(`🛰️ Proxy -> ${target}${req.path}`);
+        },
+      })(req, res, next);
+    }
+
+    console.log(`⚠️ Domínio não configurado: ${host}`);
+    res.status(404).send(`<h1>Domínio não configurado no catálogo virtual</h1>`);
+  } catch (err) {
+    console.error("❌ Erro ao processar proxy:", err);
+    res.status(500).send("Erro interno no servidor proxy");
+  }
 });
 
+// 🧠 Endpoint de debug opcional
+app.get("/debug", async (req, res) => {
+  const host = req.headers.host?.replace("www.", "").trim();
+  const data = await getDomainData(host);
+  res.json({ host, data });
+});
+
+// 🚀 Inicialização
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Proxy ativo na porta ${PORT}`));
