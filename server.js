@@ -5,7 +5,7 @@ import fetch from "node-fetch";
 const app = express();
 
 const SUPABASE_URL = "https://hbpekfnexdtnbahmmufm.supabase.co";
-const SUPABASE_KEY = "SUA_ANON_KEY_AQUI"; // ou use process.env.SUPABASE_KEY
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg5ODU1MTcsImV4cCI6MjA3NDU2MTUxN30.R2eMWKM9naCbNizHzB_W7Uvm8cNpEDukb9mf4wNLt5M"; // ou use process.env.SUPABASE_KEY
 
 // Endpoints úteis
 app.get("/debug", async (req, res) => {
