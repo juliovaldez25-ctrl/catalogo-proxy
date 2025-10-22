@@ -4,7 +4,7 @@ import fetch from "node-fetch";
 
 const app = express();
 
-// 🔑 Configurações Supabase
+// 🔑 Configurações do Supabase
 const SUPABASE_URL = "https://hbpekfnexdtnbahmmufm.supabase.co";
 const SUPABASE_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg5ODU1MTcsImV4cCI6MjA3NDU2MTUxN30.R2eMWKM9naCbNizHzB_W7Uvm8cNpEDukb9mf4wNLt5M";
@@ -22,7 +22,7 @@ app.get("/debug", async (req, res) => {
   res.json({ host, data });
 });
 
-// 🚀 Middleware principal
+// 🚀 Proxy principal
 app.use(async (req, res, next) => {
   const host = req.headers.host?.replace("www.", "").trim();
   console.log(`🌍 Novo acesso recebido: ${host}`);
@@ -45,33 +45,20 @@ app.use(async (req, res, next) => {
         return res.status(403).send("<h2>⚠️ Domínio pendente de verificação</h2>");
       }
 
-      const target = `https://catalogovirtual.app.br/${slug}`;
+      // 🔥 Aqui está a correção principal:
+      const target = `https://catalogovirtual.app.br/s/${slug}`;
       console.log(`➡️ Redirecionando ${host} → ${target}`);
 
-      // ✅ Proxy avançado com HTTPS e cabeçalhos completos
+      // Proxy avançado HTTPS
       return createProxyMiddleware({
         target,
         changeOrigin: true,
-        followRedirects: true,
         secure: true,
+        followRedirects: true,
         headers: {
           "X-Forwarded-Host": host,
           "X-Forwarded-Proto": "https",
           "User-Agent": req.headers["user-agent"] || "Render-Proxy",
         },
         onError: (err, req, res) => {
-          console.error("❌ Erro no proxy:", err.message);
-          res.status(500).send("<h1>Erro ao carregar a loja</h1>");
-        },
-      })(req, res, next);
-    }
-
-    res.status(404).send("<h1>Domínio não configurado</h1>");
-  } catch (error) {
-    console.error("💥 Erro geral:", error);
-    res.status(500).send("<h1>Erro interno</h1>");
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Proxy ativo na porta ${PORT}`));
+          console.err
