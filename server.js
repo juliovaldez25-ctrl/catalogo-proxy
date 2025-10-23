@@ -9,17 +9,20 @@ const SUPABASE_URL = "https://hbpekfnexdtnbahmmufm.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg5ODU1MTcsImV4cCI6MjA3NDU2MTUxN30.R2eMWKM9naCbNizHzB_W7Uvm8cNpEDukb9mf4wNLt5M";
 const ORIGIN = "https://catalogovirtual.app.br"; // domínio original das lojas
 
-// 🧠 Cache de domínios para performance
+// 🧠 Cache de domínios
 const domainCache = new Map();
 async function getDomainData(host) {
   if (domainCache.has(host)) return domainCache.get(host);
 
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`, {
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-    },
-  });
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
+    {
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+      },
+    }
+  );
 
   const data = await res.json();
   if (Array.isArray(data) && data.length > 0) {
@@ -32,7 +35,7 @@ async function getDomainData(host) {
   return null;
 }
 
-// ⚙️ Identifica paths estáticos (não precisam de slug)
+// ⚙️ Paths estáticos
 const STATIC_PATHS = [
   /^\/assets\//,
   /^\/favicon\.ico$/,
@@ -44,36 +47,45 @@ const STATIC_PATHS = [
 ];
 const isStatic = (path) => STATIC_PATHS.some((rx) => rx.test(path));
 
-// 🧭 Proxy principal
+// 🧭 Proxy principal (substituído pelo novo bloco)
 app.use(async (req, res, next) => {
-  const host = req.headers.host?.replace(/^www\./, "").trim();
+  const originalHost = req.headers.host?.trim() || "";
+  const cleanHost = originalHost.replace(/^www\./, "");
   const path = req.path;
 
-  // Busca slug no Supabase
-  const domainData = await getDomainData(host);
+  // tenta domínio exatamente como chegou
+  let domainData = await getDomainData(cleanHost);
+
+  // se não encontrar, tenta com www.
   if (!domainData) {
-    console.log(`⚠️ Domínio não configurado: ${host}`);
-    return res.status(404).send("<h1>Domínio não configurado no Catálogo Virtual</h1>");
+    const wwwHost = `www.${cleanHost}`;
+    domainData = await getDomainData(wwwHost);
+    if (domainData) {
+      console.log(`↪️ Redirecionando ${originalHost} → ${wwwHost}`);
+      return res.redirect(301, `https://${wwwHost}${req.url}`);
+    }
+  }
+
+  if (!domainData) {
+    console.log(`⚠️ Domínio não configurado: ${originalHost}`);
+    return res
+      .status(404)
+      .send("<h1>Domínio não configurado no Catálogo Virtual</h1>");
   }
 
   const { slug } = domainData;
   const isStaticFile = isStatic(path);
+  const target = isStaticFile ? ORIGIN : `${ORIGIN}/s/${slug}`;
 
-  // Define alvo dinâmico
-  const target = isStaticFile
-    ? ORIGIN // assets e arquivos estáticos
-    : `${ORIGIN}/s/${slug}`; // conteúdo da loja
+  console.log(`➡️ Proxy: ${originalHost}${path} → ${target}`);
 
-  console.log(`➡️ Proxy: ${host}${path} → ${target}`);
-
-  // Proxy sem pathRewrite, apenas com roteamento dinâmico
   return createProxyMiddleware({
     target,
     changeOrigin: true,
     secure: true,
     followRedirects: true,
     headers: {
-      "X-Forwarded-Host": host,
+      "X-Forwarded-Host": originalHost,
       "X-Forwarded-Proto": "https",
       "User-Agent": req.headers["user-agent"] || "CatalogoProxy",
     },
