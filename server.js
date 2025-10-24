@@ -127,7 +127,7 @@ app.use(async (req, res, next) => {
 /* ======================================================
    🚀 INICIALIZA SERVIDOR
 ====================================================== */
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`🚀 Proxy reverso ativo na porta ${PORT}`);
 });
