@@ -7,12 +7,12 @@ const app = express();
 /* ======================================================
    🔑 CONFIGURAÇÕES PRINCIPAIS
 ====================================================== */
-const SUPABASE_URL = "https://hbpekfnexdtnbahmmufm.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg5ODU1MTcsImV4cCI6MjA3NDU2MTUxN30.R2eMWKM9naCbNizHzB_W7Uvm8cNpEDukb9mf4wNLt5M";
-const ORIGIN = "https://catalogovirtual.app.br"; // domínio principal
+const SUPABASE_URL = process.env.SUPABASE_URL || "https://hbpekfnexdtnbahmmufm.supabase.co";
+const SUPABASE_KEY = process.env.SUPABASE_KEY || "INSIRA_SUA_CHAVE_AQUI";
+const ORIGIN = process.env.ORIGIN || "https://catalogovirtual.app.br";
 
 /* ======================================================
-   🧠 CACHE DE DOMÍNIOS (para reduzir consultas ao Supabase)
+   🧠 CACHE DE DOMÍNIOS
 ====================================================== */
 const domainCache = new Map();
 
@@ -31,8 +31,12 @@ async function getDomainData(host) {
       }
     );
 
-    const data = await res.json();
+    if (!res.ok) {
+      console.error("❌ Erro Supabase:", res.status, await res.text());
+      return null;
+    }
 
+    const data = await res.json();
     if (Array.isArray(data) && data.length > 0) {
       const row = data[0];
       if (row.status === "active" || row.status === "verified") {
@@ -41,14 +45,14 @@ async function getDomainData(host) {
       }
     }
   } catch (err) {
-    console.error("❌ Erro ao consultar Supabase:", err.message);
+    console.error("❌ Falha ao consultar Supabase:", err.message);
   }
 
   return null;
 }
 
 /* ======================================================
-   🧩 ROTAS ESTÁTICAS (não devem passar pelo proxy)
+   🧩 ROTAS ESTÁTICAS
 ====================================================== */
 const STATIC_PATHS = [
   /^\/assets\//,
@@ -62,34 +66,23 @@ const STATIC_PATHS = [
 const isStatic = (path) => STATIC_PATHS.some((rx) => rx.test(path));
 
 /* ======================================================
-   🧭 PROXY PRINCIPAL
+   🧭 MIDDLEWARE PRINCIPAL
 ====================================================== */
 app.use(async (req, res, next) => {
   const originalHost = req.headers.host?.trim().toLowerCase() || "";
   const cleanHost = originalHost.replace(/^www\./, "");
   const path = req.path;
 
-  console.log("🌐 Host recebido:", cleanHost, "| Caminho:", path);
+  console.log("🌐 Requisição:", { host: cleanHost, path });
 
-  // Ignora chamadas internas de verificação
+  // Evita que acessos diretos à Railway quebrem
   if (!cleanHost || cleanHost.includes("railway.app")) {
     return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
 
-  // Busca no cache / Supabase
-  let domainData = await getDomainData(cleanHost);
+  // Busca domínio no Supabase
+  const domainData = await getDomainData(cleanHost);
 
-  // Tenta com www se não achar
-  if (!domainData) {
-    const wwwHost = `www.${cleanHost}`;
-    domainData = await getDomainData(wwwHost);
-    if (domainData) {
-      console.log(`↪️ Redirecionando ${originalHost} → ${wwwHost}`);
-      return res.redirect(301, `https://${wwwHost}${req.url}`);
-    }
-  }
-
-  // Domínio não encontrado
   if (!domainData) {
     console.warn(`⚠️ Domínio não configurado: ${cleanHost}`);
     return res
@@ -97,7 +90,7 @@ app.use(async (req, res, next) => {
       .send(`<h1>Domínio não configurado: ${cleanHost}</h1>`);
   }
 
-  // Define destino
+  // Monta destino
   const { slug } = domainData;
   const isStaticFile = isStatic(path);
   const target = isStaticFile ? ORIGIN : `${ORIGIN}/s/${slug}`;
@@ -108,8 +101,8 @@ app.use(async (req, res, next) => {
   return createProxyMiddleware({
     target,
     changeOrigin: true,
-    followRedirects: true,
     secure: true,
+    followRedirects: true,
     headers: {
       "X-Forwarded-Host": originalHost,
       "X-Forwarded-Proto": "https",
@@ -127,7 +120,7 @@ app.use(async (req, res, next) => {
 /* ======================================================
    🚀 INICIALIZA SERVIDOR
 ====================================================== */
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
+const PORT = process.env.PORT || 8080; // Railway usa 8080
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Proxy reverso ativo na porta ${PORT}`);
 });
