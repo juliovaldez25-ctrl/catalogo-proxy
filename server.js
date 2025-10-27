@@ -120,7 +120,7 @@ app.use(async (req, res, next) => {
 /* ======================================================
    🚀 INICIALIZA SERVIDOR
 ====================================================== */
-const PORT = process.env.PORT || 8080; // Railway usa 8080
+const PORT = process.env.PORT || 3000; // Railway usa 8080
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Proxy reverso ativo na porta ${PORT}`);
 });
