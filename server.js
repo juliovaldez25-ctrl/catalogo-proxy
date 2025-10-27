@@ -5,7 +5,7 @@ import fetch from "node-fetch";
 const app = express();
 
 /* ======================================================
-   🔑 CONFIGURAÇÕES PRINCIPAIS
+   🔑 CONFIGURAÇÕES
 ====================================================== */
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://hbpekfnexdtnbahmmufm.supabase.co";
 const SUPABASE_KEY = process.env.SUPABASE_KEY || "INSIRA_SUA_CHAVE_AQUI";
@@ -47,12 +47,11 @@ async function getDomainData(host) {
   } catch (err) {
     console.error("❌ Falha ao consultar Supabase:", err.message);
   }
-
   return null;
 }
 
 /* ======================================================
-   🧩 ROTAS ESTÁTICAS
+   🧩 ROTAS ESTÁTICAS + VALIDAÇÃO CLOUDFLARE
 ====================================================== */
 const STATIC_PATHS = [
   /^\/assets\//,
@@ -63,10 +62,17 @@ const STATIC_PATHS = [
   /^\/~flock\.js$/,
   /^\/~api\//,
 ];
+
+// rota obrigatória p/ Cloudflare DV HTTP validation
+app.get("/.well-known/pki-validation/:file", (req, res) => {
+  console.log("🧾 Validação SSL recebida:", req.params.file);
+  res.status(200).send("ok");
+});
+
 const isStatic = (path) => STATIC_PATHS.some((rx) => rx.test(path));
 
 /* ======================================================
-   🧭 MIDDLEWARE PRINCIPAL
+   🧭 PROXY PRINCIPAL
 ====================================================== */
 app.use(async (req, res, next) => {
   const originalHost = req.headers.host?.trim().toLowerCase() || "";
@@ -75,34 +81,30 @@ app.use(async (req, res, next) => {
 
   console.log("🌐 Requisição:", { host: cleanHost, path });
 
-  // Evita que acessos diretos à Railway quebrem
+  // evita loop / fallback railway
   if (!cleanHost || cleanHost.includes("railway.app")) {
     return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
 
-  // Busca domínio no Supabase
   const domainData = await getDomainData(cleanHost);
 
   if (!domainData) {
     console.warn(`⚠️ Domínio não configurado: ${cleanHost}`);
-    return res
-      .status(404)
-      .send(`<h1>Domínio não configurado: ${cleanHost}</h1>`);
+    return res.status(404).send(`<h1>Domínio não configurado: ${cleanHost}</h1>`);
   }
 
-  // Monta destino
   const { slug } = domainData;
   const isStaticFile = isStatic(path);
   const target = isStaticFile ? ORIGIN : `${ORIGIN}/s/${slug}`;
 
   console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
 
-  // Cria proxy dinâmico
   return createProxyMiddleware({
     target,
     changeOrigin: true,
-    secure: true,
+    secure: false,          // 🔑 aceita certificados Cloudflare/Railway
     followRedirects: true,
+    xfwd: true,
     headers: {
       "X-Forwarded-Host": originalHost,
       "X-Forwarded-Proto": "https",
@@ -110,9 +112,7 @@ app.use(async (req, res, next) => {
     },
     onError(err, req, res) {
       console.error("❌ Erro no proxy:", err.message);
-      res
-        .status(502)
-        .send(`<h1>Erro ao carregar a loja (${cleanHost})</h1>`);
+      res.status(502).send(`<h1>Erro ao carregar a loja (${cleanHost})</h1>`);
     },
   })(req, res, next);
 });
@@ -120,7 +120,7 @@ app.use(async (req, res, next) => {
 /* ======================================================
    🚀 INICIALIZA SERVIDOR
 ====================================================== */
-const PORT = process.env.PORT || 3000; // Railway usa 8080
+const PORT = process.env.PORT || 3000; // runtime V2 usa 3000
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Proxy reverso ativo na porta ${PORT}`);
 });
