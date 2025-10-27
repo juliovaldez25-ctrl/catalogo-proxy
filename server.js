@@ -1,15 +1,29 @@
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import fetch from "node-fetch";
+import jwt from "jsonwebtoken";
 
 const app = express();
 
 /* ======================================================
    🔑 CONFIGURAÇÕES PRINCIPAIS
 ====================================================== */
-const SUPABASE_URL = "https://hbpekfnexdtnbahmmufm.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg5ODU1MTcsImV4cCI6MjA3NDU2MTUxN30.R2eMWKM9naCbNizHzB_W7Uvm8cNpEDukb9mf4wNLt5M";
-const ORIGIN = "https://catalogovirtual.app.br"; // domínio principal
+const SUPABASE_URL = process.env.SUPABASE_URL || "https://hbpekfnexdtnbahmmufm.supabase.co";
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; // ⚠️ coloque no Railway
+const ORIGIN = "https://catalogovirtual.app.br";
+
+/* ======================================================
+   🔐 FUNÇÃO PARA CRIAR JWT TEMPORÁRIO
+====================================================== */
+function generateJWT() {
+  const payload = {
+    role: "service_role",
+    iss: "catalogo-proxy",
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 60 * 5,
+  };
+  return jwt.sign(payload, SUPABASE_KEY, { algorithm: "HS256" });
+}
 
 /* ======================================================
    🧠 CACHE DE DOMÍNIOS
@@ -21,12 +35,13 @@ async function getDomainData(host) {
   if (domainCache.has(host)) return domainCache.get(host);
 
   try {
+    const token = generateJWT();
     const res = await fetch(
       `${SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
       {
         headers: {
           apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`,
+          Authorization: `Bearer ${token}`,
         },
       }
     );
@@ -37,7 +52,6 @@ async function getDomainData(host) {
     }
 
     const data = await res.json();
-
     if (Array.isArray(data) && data.length > 0) {
       const row = data[0];
       if (row.status === "active" || row.status === "verified") {
@@ -53,7 +67,7 @@ async function getDomainData(host) {
 }
 
 /* ======================================================
-   🧩 ROTAS ESTÁTICAS (não devem passar pelo proxy)
+   🚦 ROTAS ESTÁTICAS
 ====================================================== */
 const STATIC_PATHS = [
   /^\/assets\//,
@@ -74,31 +88,24 @@ app.use(async (req, res, next) => {
   const cleanHost = originalHost.replace(/^www\./, "");
   const path = req.path;
 
-  console.log("🌐 Requisição recebida:", cleanHost, "| Caminho:", path);
+  console.log("🌐 Requisição:", cleanHost, "| Caminho:", path);
 
-  // Evita loop e acessos diretos ao Railway
   if (!cleanHost || cleanHost.includes("railway.app")) {
     return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
 
-  // Busca domínio no cache ou Supabase
   const domainData = await getDomainData(cleanHost);
 
   if (!domainData) {
     console.warn(`⚠️ Domínio não configurado: ${cleanHost}`);
-    return res
-      .status(404)
-      .send(`<h1>Domínio não configurado: ${cleanHost}</h1>`);
+    return res.status(404).send(`<h1>Domínio não configurado: ${cleanHost}</h1>`);
   }
 
-  // Monta destino
   const { slug } = domainData;
-  const isStaticFile = isStatic(path);
-  const target = isStaticFile ? ORIGIN : `${ORIGIN}/s/${slug}`;
+  const target = isStatic(path) ? ORIGIN : `${ORIGIN}/s/${slug}`;
 
   console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
 
-  // Cria proxy dinâmico
   return createProxyMiddleware({
     target,
     changeOrigin: true,
@@ -111,17 +118,15 @@ app.use(async (req, res, next) => {
     },
     onError(err, req, res) {
       console.error("❌ Erro no proxy:", err.message);
-      res
-        .status(502)
-        .send(`<h1>Erro ao carregar a loja (${cleanHost})</h1>`);
+      res.status(502).send(`<h1>Erro ao carregar a loja (${cleanHost})</h1>`);
     },
   })(req, res, next);
 });
 
 /* ======================================================
-   🚀 SERVIDOR EXPRESS
+   🚀 INICIALIZA SERVIDOR
 ====================================================== */
-const PORT = process.env.PORT || 8080; // Railway define PORT automaticamente
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Proxy reverso ativo e escutando na porta ${PORT}`);
+  console.log(`🚀 Proxy reverso ativo na porta ${PORT}`);
 });
