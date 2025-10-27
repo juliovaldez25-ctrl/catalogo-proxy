@@ -1,0 +1,22 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "NIXPACKS",
+    "buildCommand": "npm install"
+  },
+  "deploy": {
+    "runtime": "V2",
+    "numReplicas": 1,
+    "sleepApplication": false,
+    "useLegacyStacker": false,
+    "restartPolicyType": "ALWAYS",
+    "restartPolicyMaxRetries": 0,
+    "multiRegionConfig": {
+      "us-east1": {
+        "numReplicas": 1
+      }
+    },
+    "healthcheckPath": "/",
+    "healthcheckTimeoutSeconds": 10
+  }
+}
