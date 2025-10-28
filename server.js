@@ -20,7 +20,6 @@ const CONFIG = {
   ORIGIN: "https://catalogovirtual.app.br",
   CACHE_TTL: 1000 * 60 * 10, // 10 minutos
   TIMEOUT: 7000, // 7 segundos
-  PORT: process.env.PORT || 8080,
 };
 
 /* ======================================================
