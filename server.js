@@ -1,9 +1,6 @@
-
-PORT=8080
-
 /**
  * 🔥 Proxy Reverso - Catálogo Virtual
- * Versão robusta e independente de .env
+ * Versão robusta, sem .env e com cache + logs aprimorados
  */
 
 import express from "express";
@@ -18,23 +15,23 @@ const app = express();
 ====================================================== */
 const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
-  SUPABASE_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
+  SUPABASE_KEY:
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
   ORIGIN: "https://catalogovirtual.app.br",
   CACHE_TTL: 1000 * 60 * 10, // 10 minutos
   TIMEOUT: 7000, // 7 segundos
   PORT: process.env.PORT || 8080,
 };
 
-
 /* ======================================================
-   🔐 JWT TEMPORÁRIO
+   🔐 JWT TEMPORÁRIO (para autenticar no Supabase)
 ====================================================== */
 function generateJWT() {
   const payload = {
     role: "service_role",
     iss: "catalogo-proxy",
     iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 60 * 5,
+    exp: Math.floor(Date.now() / 1000) + 60 * 5, // 5 minutos
   };
   return jwt.sign(payload, CONFIG.SUPABASE_KEY, { algorithm: "HS256" });
 }
@@ -125,9 +122,9 @@ app.use(async (req, res, next) => {
   const cleanHost = originalHost.replace(/^www\./, "");
   const path = req.path;
 
-  console.log(`[REQ] ${cleanHost} ${path}`);
+  console.log(`🌐 Requisição recebida: ${cleanHost} | Caminho: ${path}`);
 
-  // Página de verificação de proxy
+  // Página de status
   if (!cleanHost || cleanHost.includes("railway.app")) {
     return res
       .status(200)
@@ -150,7 +147,7 @@ app.use(async (req, res, next) => {
     ? CONFIG.ORIGIN
     : `${CONFIG.ORIGIN}/s/${domainData.slug}`;
 
-  console.log(`➡️ ${cleanHost}${path} → ${target}`);
+  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
 
   return createProxyMiddleware({
     target,
