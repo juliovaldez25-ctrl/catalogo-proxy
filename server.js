@@ -17,13 +17,14 @@ const app = express();
    🔧 CONFIGURAÇÕES PRINCIPAIS
 ====================================================== */
 const CONFIG = {
-  SUPABASE_URL=https://hbpekfnexdtnbahmmufm.supabase.co
-  SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA
+  SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
+  SUPABASE_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
   ORIGIN: "https://catalogovirtual.app.br",
   CACHE_TTL: 1000 * 60 * 10, // 10 minutos
   TIMEOUT: 7000, // 7 segundos
   PORT: process.env.PORT || 8080,
 };
+
 
 /* ======================================================
    🔐 JWT TEMPORÁRIO
