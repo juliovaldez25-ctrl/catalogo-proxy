@@ -1,3 +1,11 @@
+
+PORT=8080
+
+/**
+ * 🔥 Proxy Reverso - Catálogo Virtual
+ * Versão robusta e independente de .env
+ */
+
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import fetch from "node-fetch";
@@ -6,14 +14,19 @@ import jwt from "jsonwebtoken";
 const app = express();
 
 /* ======================================================
-   🔑 CONFIGURAÇÕES PRINCIPAIS
+   🔧 CONFIGURAÇÕES PRINCIPAIS
 ====================================================== */
-const SUPABASE_URL = process.env.SUPABASE_URL || "https://hbpekfnexdtnbahmmufm.supabase.co";
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY; // ⚠️ coloque no Railway
-const ORIGIN = "https://catalogovirtual.app.br";
+const CONFIG = {
+  SUPABASE_URL=https://hbpekfnexdtnbahmmufm.supabase.co
+  SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA
+  ORIGIN: "https://catalogovirtual.app.br",
+  CACHE_TTL: 1000 * 60 * 10, // 10 minutos
+  TIMEOUT: 7000, // 7 segundos
+  PORT: process.env.PORT || 8080,
+};
 
 /* ======================================================
-   🔐 FUNÇÃO PARA CRIAR JWT TEMPORÁRIO
+   🔐 JWT TEMPORÁRIO
 ====================================================== */
 function generateJWT() {
   const payload = {
@@ -22,45 +35,68 @@ function generateJWT() {
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + 60 * 5,
   };
-  return jwt.sign(payload, SUPABASE_KEY, { algorithm: "HS256" });
+  return jwt.sign(payload, CONFIG.SUPABASE_KEY, { algorithm: "HS256" });
 }
 
 /* ======================================================
-   🧠 CACHE DE DOMÍNIOS
+   🧠 CACHE DE DOMÍNIOS (com TTL)
 ====================================================== */
 const domainCache = new Map();
 
+function setCache(host, data) {
+  domainCache.set(host, { data, expires: Date.now() + CONFIG.CACHE_TTL });
+}
+
+function getCache(host) {
+  const cached = domainCache.get(host);
+  if (!cached) return null;
+  if (Date.now() > cached.expires) {
+    domainCache.delete(host);
+    return null;
+  }
+  return cached.data;
+}
+
+/* ======================================================
+   🛰️ FUNÇÃO: BUSCA DOMÍNIO NO SUPABASE
+====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
-  if (domainCache.has(host)) return domainCache.get(host);
+
+  const cached = getCache(host);
+  if (cached) return cached;
+
+  const token = generateJWT();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
 
   try {
-    const token = generateJWT();
     const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
+      `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
       {
         headers: {
-          apikey: SUPABASE_KEY,
+          apikey: CONFIG.SUPABASE_KEY,
           Authorization: `Bearer ${token}`,
         },
+        signal: controller.signal,
       }
     );
 
+    clearTimeout(timeout);
+
     if (!res.ok) {
-      console.error("❌ Erro Supabase:", res.status, await res.text());
+      console.error(`❌ [Supabase ${res.status}] ${await res.text()}`);
       return null;
     }
 
     const data = await res.json();
-    if (Array.isArray(data) && data.length > 0) {
-      const row = data[0];
-      if (row.status === "active" || row.status === "verified") {
-        domainCache.set(host, row);
-        return row;
-      }
+    const row = data?.[0];
+    if (row && ["active", "verified"].includes(row.status)) {
+      setCache(host, row);
+      return row;
     }
   } catch (err) {
-    console.error("❌ Falha ao consultar Supabase:", err.message);
+    console.error(`⚠️ Falha Supabase: ${err.name} | ${err.message}`);
   }
 
   return null;
@@ -88,37 +124,54 @@ app.use(async (req, res, next) => {
   const cleanHost = originalHost.replace(/^www\./, "");
   const path = req.path;
 
-  console.log("🌐 Requisição:", cleanHost, "| Caminho:", path);
+  console.log(`[REQ] ${cleanHost} ${path}`);
 
+  // Página de verificação de proxy
   if (!cleanHost || cleanHost.includes("railway.app")) {
-    return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
+    return res
+      .status(200)
+      .send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
 
   const domainData = await getDomainData(cleanHost);
 
   if (!domainData) {
-    console.warn(`⚠️ Domínio não configurado: ${cleanHost}`);
-    return res.status(404).send(`<h1>Domínio não configurado: ${cleanHost}</h1>`);
+    console.warn(`⚠️ Domínio não configurado ou inativo: ${cleanHost}`);
+    return res.status(404).send(`
+      <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
+      <h2>⚠️ Domínio não configurado</h2>
+      <p>${cleanHost} ainda não foi ativado no Catálogo Virtual.</p>
+      </body></html>
+    `);
   }
 
-  const { slug } = domainData;
-  const target = isStatic(path) ? ORIGIN : `${ORIGIN}/s/${slug}`;
+  const target = isStatic(path)
+    ? CONFIG.ORIGIN
+    : `${CONFIG.ORIGIN}/s/${domainData.slug}`;
 
-  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
+  console.log(`➡️ ${cleanHost}${path} → ${target}`);
 
   return createProxyMiddleware({
     target,
     changeOrigin: true,
     secure: true,
     followRedirects: true,
+    xfwd: true,
+    proxyTimeout: 10000,
     headers: {
       "X-Forwarded-Host": originalHost,
       "X-Forwarded-Proto": "https",
       "User-Agent": req.headers["user-agent"] || "CatalogoProxy",
     },
     onError(err, req, res) {
-      console.error("❌ Erro no proxy:", err.message);
-      res.status(502).send(`<h1>Erro ao carregar a loja (${cleanHost})</h1>`);
+      console.error(`❌ ProxyError [${cleanHost}]`, err.message);
+      res.status(502).send(`
+        <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
+        <h2>❌ Erro temporário</h2>
+        <p>Não foi possível carregar a loja de <b>${cleanHost}</b>.</p>
+        <p>${err.message}</p>
+        </body></html>
+      `);
     },
   })(req, res, next);
 });
@@ -126,7 +179,6 @@ app.use(async (req, res, next) => {
 /* ======================================================
    🚀 INICIALIZA SERVIDOR
 ====================================================== */
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Proxy reverso ativo na porta ${PORT}`);
+app.listen(CONFIG.PORT, "0.0.0.0", () => {
+  console.log(`🚀 Proxy reverso ativo na porta ${CONFIG.PORT}`);
 });
