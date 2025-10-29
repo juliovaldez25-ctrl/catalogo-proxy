@@ -1,6 +1,7 @@
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import fetch from "node-fetch";
+import zlib from "zlib";
 
 const app = express();
 
@@ -12,13 +13,13 @@ const CONFIG = {
   SUPABASE_KEY:
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
   ORIGIN: "https://catalogovirtual.app.br",
-  CACHE_TTL: 1000 * 60 * 10, // 10 minutos
-  TIMEOUT: 7000, // 7 segundos
+  CACHE_TTL: 1000 * 60 * 10,
+  TIMEOUT: 7000,
   PORT: process.env.PORT || 8080,
 };
 
 /* ======================================================
-   🌐 CORS GLOBAL (liberado)
+   🌐 CORS GLOBAL
 ====================================================== */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -35,18 +36,15 @@ app.use((req, res, next) => {
 });
 
 /* ======================================================
-   🧠 CACHE DE DOMÍNIOS (com TTL)
+   🧠 CACHE
 ====================================================== */
 const domainCache = new Map();
-
 function setCache(host, data) {
   domainCache.set(host, { data, expires: Date.now() + CONFIG.CACHE_TTL });
 }
-
 function getCache(host) {
   const cached = domainCache.get(host);
-  if (!cached) return null;
-  if (Date.now() > cached.expires) {
+  if (!cached || Date.now() > cached.expires) {
     domainCache.delete(host);
     return null;
   }
@@ -54,16 +52,12 @@ function getCache(host) {
 }
 
 /* ======================================================
-   🛰️ FUNÇÃO: BUSCA DOMÍNIO NO SUPABASE
+   🛰️ SUPABASE
 ====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
-
   const cached = getCache(host);
   if (cached) return cached;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
 
   try {
     const res = await fetch(
@@ -73,14 +67,10 @@ async function getDomainData(host) {
           apikey: CONFIG.SUPABASE_KEY,
           Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
         },
-        signal: controller.signal,
       }
     );
-
-    clearTimeout(timeout);
-
     if (!res.ok) {
-      console.error(`❌ [Supabase ${res.status}] ${await res.text()}`);
+      console.error(`❌ Supabase ${res.status}: ${await res.text()}`);
       return null;
     }
 
@@ -91,9 +81,8 @@ async function getDomainData(host) {
       return row;
     }
   } catch (err) {
-    console.error(`⚠️ Falha Supabase: ${err.name} | ${err.message}`);
+    console.error("⚠️ Erro Supabase:", err.message);
   }
-
   return null;
 }
 
@@ -119,22 +108,17 @@ app.use(async (req, res, next) => {
   const cleanHost = originalHost.replace(/^www\./, "");
   const path = req.path;
 
-  console.log(`🌐 Requisição recebida: ${cleanHost} | Caminho: ${path}`);
+  console.log(`🌐 ${cleanHost} → ${path}`);
 
-  // Página de status
   if (!cleanHost || cleanHost.includes("railway.app")) {
-    return res
-      .status(200)
-      .send("✅ Proxy ativo e aguardando conexões Cloudflare");
+    return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
 
   const domainData = await getDomainData(cleanHost);
-
   if (!domainData) {
-    console.warn(`⚠️ Domínio não configurado ou inativo: ${cleanHost}`);
     return res.status(404).send(`
       <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
-      <h2 style="color:#eab308">⚠️ Domínio não configurado</h2>
+      <h2>⚠️ Domínio não configurado</h2>
       <p>${cleanHost} ainda não foi ativado no Catálogo Virtual.</p>
       </body></html>
     `);
@@ -144,32 +128,47 @@ app.use(async (req, res, next) => {
     ? CONFIG.ORIGIN
     : `${CONFIG.ORIGIN}/s/${domainData.slug}`;
 
-  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
-
   return createProxyMiddleware({
     target,
     changeOrigin: true,
     secure: true,
-    followRedirects: true,
     xfwd: true,
-    proxyTimeout: 10000,
-    headers: {
-      "X-Forwarded-Host": originalHost,
-      "X-Forwarded-Proto": "https",
-      "User-Agent": req.headers["user-agent"] || "CatalogoProxy",
-    },
+
     onProxyRes(proxyRes, req, res) {
-      delete proxyRes.headers["content-encoding"]; // evita erro gzip
+      const enc = proxyRes.headers["content-encoding"];
+      const chunks = [];
+
+      proxyRes.on("data", (chunk) => chunks.push(chunk));
+
+      proxyRes.on("end", () => {
+        let buffer = Buffer.concat(chunks);
+        const contentType = proxyRes.headers["content-type"] || "";
+
+        // Remove encoding para evitar erro
+        delete proxyRes.headers["content-encoding"];
+        delete proxyRes.headers["content-length"];
+
+        if (enc === "gzip") buffer = zlib.gunzipSync(buffer);
+        else if (enc === "br") buffer = zlib.brotliDecompressSync(buffer);
+
+        if (contentType.includes("text/html")) {
+          let html = buffer.toString("utf8");
+          html = html.replace(
+            "</head>",
+            `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
+          );
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          res.end(html);
+        } else {
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          res.end(buffer);
+        }
+      });
     },
+
     onError(err, req, res) {
-      console.error(`❌ ProxyError [${cleanHost}]`, err.message);
-      res.status(502).send(`
-        <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
-        <h2>❌ Erro temporário</h2>
-        <p>Não foi possível carregar a loja de <b>${cleanHost}</b>.</p>
-        <p>${err.message}</p>
-        </body></html>
-      `);
+      console.error("❌ ProxyError", err.message);
+      res.status(502).send(`<h2>Erro 502</h2><p>${err.message}</p>`);
     },
   })(req, res, next);
 });
