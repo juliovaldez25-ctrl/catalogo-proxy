@@ -6,20 +6,21 @@ import zlib from "zlib";
 const app = express();
 
 /* ======================================================
-   🔧 CONFIGURAÇÕES PRINCIPAIS
+   ⚙️ CONFIGURAÇÕES PRINCIPAIS
 ====================================================== */
 const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
   SUPABASE_KEY:
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
+  EDGE_FUNCTION: "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/cors-allow",
   ORIGIN: "https://catalogovirtual.app.br",
-  CACHE_TTL: 1000 * 60 * 10,
+  CACHE_TTL: 1000 * 60 * 10, // 10 minutos
   TIMEOUT: 7000,
   PORT: process.env.PORT || 8080,
 };
 
 /* ======================================================
-   🌐 CORS GLOBAL
+   🌐 CORS LIBERADO GLOBALMENTE
 ====================================================== */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -36,7 +37,7 @@ app.use((req, res, next) => {
 });
 
 /* ======================================================
-   🧠 CACHE
+   🧠 CACHE DE DOMÍNIOS
 ====================================================== */
 const domainCache = new Map();
 function setCache(host, data) {
@@ -52,14 +53,38 @@ function getCache(host) {
 }
 
 /* ======================================================
-   🛰️ SUPABASE
+   🛰️ FUNÇÃO: BUSCA DOMÍNIO NO SUPABASE
+   Tenta 1️⃣ Edge Function → 2️⃣ REST fallback
 ====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
+
   const cached = getCache(host);
   if (cached) return cached;
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
+
   try {
+    // 1️⃣ Tenta a Edge Function (cors-allow)
+    const edge = await fetch(`${CONFIG.EDGE_FUNCTION}?domain=${host}`, {
+      headers: {
+        Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
+      },
+      signal: controller.signal,
+    });
+
+    if (edge.ok) {
+      const json = await edge.json();
+      if (json?.slug) {
+        setCache(host, json);
+        return json;
+      }
+    } else {
+      console.warn(`⚠️ Edge Function falhou: ${edge.status}`);
+    }
+
+    // 2️⃣ Fallback direto no Supabase REST
     const res = await fetch(
       `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
       {
@@ -67,10 +92,13 @@ async function getDomainData(host) {
           apikey: CONFIG.SUPABASE_KEY,
           Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
         },
+        signal: controller.signal,
       }
     );
+
+    clearTimeout(timeout);
     if (!res.ok) {
-      console.error(`❌ Supabase ${res.status}: ${await res.text()}`);
+      console.error(`❌ [Supabase ${res.status}] ${await res.text()}`);
       return null;
     }
 
@@ -81,8 +109,9 @@ async function getDomainData(host) {
       return row;
     }
   } catch (err) {
-    console.error("⚠️ Erro Supabase:", err.message);
+    console.error(`⚠️ Erro Supabase: ${err.name} | ${err.message}`);
   }
+
   return null;
 }
 
@@ -101,7 +130,7 @@ const STATIC_PATHS = [
 const isStatic = (path) => STATIC_PATHS.some((rx) => rx.test(path));
 
 /* ======================================================
-   🧭 MIDDLEWARE PRINCIPAL
+   🧭 MIDDLEWARE PRINCIPAL (PROXY)
 ====================================================== */
 app.use(async (req, res, next) => {
   const originalHost = req.headers.host?.trim().toLowerCase() || "";
@@ -128,6 +157,8 @@ app.use(async (req, res, next) => {
     ? CONFIG.ORIGIN
     : `${CONFIG.ORIGIN}/s/${domainData.slug}`;
 
+  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
+
   return createProxyMiddleware({
     target,
     changeOrigin: true,
@@ -139,12 +170,10 @@ app.use(async (req, res, next) => {
       const chunks = [];
 
       proxyRes.on("data", (chunk) => chunks.push(chunk));
-
       proxyRes.on("end", () => {
         let buffer = Buffer.concat(chunks);
         const contentType = proxyRes.headers["content-type"] || "";
 
-        // Remove encoding para evitar erro
         delete proxyRes.headers["content-encoding"];
         delete proxyRes.headers["content-length"];
 
