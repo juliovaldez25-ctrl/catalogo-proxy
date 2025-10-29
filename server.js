@@ -2,9 +2,11 @@ import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import fetch from "node-fetch";
 
-
 const app = express();
 
+/* ======================================================
+   🔧 CONFIGURAÇÕES PRINCIPAIS
+====================================================== */
 const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
   SUPABASE_KEY:
@@ -12,10 +14,25 @@ const CONFIG = {
   ORIGIN: "https://catalogovirtual.app.br",
   CACHE_TTL: 1000 * 60 * 10, // 10 minutos
   TIMEOUT: 7000, // 7 segundos
- PORT: process.env.PORT || 8080, 
+  PORT: process.env.PORT || 8080,
 };
 
-
+/* ======================================================
+   🌐 CORS GLOBAL (liberado)
+====================================================== */
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, OPTIONS, PUT, DELETE"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Requested-With"
+  );
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
 
 /* ======================================================
    🧠 CACHE DE DOMÍNIOS (com TTL)
@@ -45,7 +62,6 @@ async function getDomainData(host) {
   const cached = getCache(host);
   if (cached) return cached;
 
-  const token = generateJWT();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
 
@@ -55,7 +71,7 @@ async function getDomainData(host) {
       {
         headers: {
           apikey: CONFIG.SUPABASE_KEY,
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
         },
         signal: controller.signal,
       }
@@ -118,7 +134,7 @@ app.use(async (req, res, next) => {
     console.warn(`⚠️ Domínio não configurado ou inativo: ${cleanHost}`);
     return res.status(404).send(`
       <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
-      <h2>⚠️ Domínio não configurado</h2>
+      <h2 style="color:#eab308">⚠️ Domínio não configurado</h2>
       <p>${cleanHost} ainda não foi ativado no Catálogo Virtual.</p>
       </body></html>
     `);
@@ -141,6 +157,9 @@ app.use(async (req, res, next) => {
       "X-Forwarded-Host": originalHost,
       "X-Forwarded-Proto": "https",
       "User-Agent": req.headers["user-agent"] || "CatalogoProxy",
+    },
+    onProxyRes(proxyRes, req, res) {
+      delete proxyRes.headers["content-encoding"]; // evita erro gzip
     },
     onError(err, req, res) {
       console.error(`❌ ProxyError [${cleanHost}]`, err.message);
