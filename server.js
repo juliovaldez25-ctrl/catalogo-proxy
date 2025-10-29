@@ -1,8 +1,3 @@
-/**
- * 🔥 Proxy Reverso - Catálogo Virtual (versão simplificada)
- * ✅ Sem JWT, com cache, logs e tratamento de erros refinados
- */
-
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import fetch from "node-fetch";
@@ -10,7 +5,7 @@ import fetch from "node-fetch";
 const app = express();
 
 /* ======================================================
-   🔧 CONFIGURAÇÕES PRINCIPAIS
+   ⚙️ CONFIGURAÇÕES PRINCIPAIS
 ====================================================== */
 const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
@@ -54,21 +49,29 @@ async function getDomainData(host) {
   const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
 
   try {
+    const headers = {
+      apikey: CONFIG.SUPABASE_KEY.trim(),
+      Authorization: `Bearer ${CONFIG.SUPABASE_KEY.trim()}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+
+    console.log(`🟢 Consultando Supabase → ${host}`);
+    console.log("🔑 Headers enviados (ocultos parcialmente):", {
+      apikey: headers.apikey.slice(0, 20) + "...",
+      Authorization: headers.Authorization.slice(0, 20) + "...",
+    });
+
     const res = await fetch(
       `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
-      {
-        headers: {
-          apikey: CONFIG.SUPABASE_KEY,
-          Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
-        },
-        signal: controller.signal,
-      }
+      { headers, signal: controller.signal }
     );
 
     clearTimeout(timeout);
 
     if (!res.ok) {
-      console.error(`❌ [Supabase ${res.status}] ${await res.text()}`);
+      const errText = await res.text();
+      console.error(`❌ [Supabase ${res.status}] ${errText}`);
       return null;
     }
 
@@ -76,7 +79,10 @@ async function getDomainData(host) {
     const row = data?.[0];
     if (row && ["active", "verified"].includes(row.status)) {
       setCache(host, row);
+      console.log(`✅ Domínio ativo: ${host} → slug "${row.slug}"`);
       return row;
+    } else {
+      console.warn(`⚠️ Domínio não encontrado ou inativo: ${host}`);
     }
   } catch (err) {
     console.error(`⚠️ Falha Supabase: ${err.name} | ${err.message}`);
@@ -109,11 +115,11 @@ app.use(async (req, res, next) => {
 
   console.log(`🌐 Requisição recebida: ${cleanHost} | Caminho: ${path}`);
 
-  // Página de status (verificação)
+  // Página de status (teste rápido)
   if (!cleanHost || cleanHost.includes("railway.app")) {
     return res
       .status(200)
-      .send("✅ Proxy ativo e aguardando conexões Cloudflare");
+      .send("✅ Proxy ativo e aguardando conexões Cloudflare / DNS");
   }
 
   const domainData = await getDomainData(cleanHost);
