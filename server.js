@@ -75,12 +75,30 @@ app.use(async (req, res, next) => {
 
   if (!cleanHost) return res.status(200).send("✅ Proxy ativo e aguardando conexões");
 
-  // 🔹 Assets (css/js/img) sempre vão direto pro domínio principal
-  if (path.startsWith("/assets/")) {
-    const assetUrl = `${CONFIG.ORIGIN}${path}`;
-    console.log(`🪄 Redirecionando asset: ${path} → ${assetUrl}`);
-    return res.redirect(assetUrl);
-  }
+ // 🔹 Proxy completo para assets (corrige CORS e MIME)
+if (path.startsWith("/assets/")) {
+  return createProxyMiddleware({
+    target: CONFIG.ORIGIN,
+    changeOrigin: true,
+    followRedirects: true,
+    onProxyRes(proxyRes, req, res) {
+      // Força cabeçalhos CORS e tipo correto
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Origin, Content-Type, Accept");
+      
+      // Corrige MIME type, se necessário
+      const contentType = proxyRes.headers["content-type"];
+      if (!contentType && req.url.endsWith(".css")) {
+        res.setHeader("Content-Type", "text/css");
+      }
+      if (!contentType && req.url.endsWith(".js")) {
+        res.setHeader("Content-Type", "application/javascript");
+      }
+    },
+  })(req, res, next);
+}
+
 
   // 🔹 Busca slug no Supabase
   const domainData = await getDomainData(cleanHost);
