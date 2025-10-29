@@ -1,6 +1,8 @@
 /**
- * 🔥 Proxy Reverso - Catálogo Virtual
- * Versão final: sem JWT, com redirecionamento correto /s/slug e logs aprimorados
+ * 🔥 Proxy Reverso - Catálogo Virtual (versão PRO)
+ * ✅ Redirecionamento inteligente /s/slug
+ * ✅ Suporte a subcaminhos e debug
+ * ✅ Tolerante a falhas (fallback para ORIGIN base)
  */
 
 import express from "express";
@@ -26,20 +28,12 @@ const CONFIG = {
    🧠 CACHE DE DOMÍNIOS (com TTL)
 ====================================================== */
 const domainCache = new Map();
-
-function setCache(host, data) {
-  domainCache.set(host, { data, expires: Date.now() + CONFIG.CACHE_TTL });
-}
-
-function getCache(host) {
-  const cached = domainCache.get(host);
-  if (!cached) return null;
-  if (Date.now() > cached.expires) {
-    domainCache.delete(host);
-    return null;
-  }
-  return cached.data;
-}
+const setCache = (h, d) => domainCache.set(h, { data: d, expires: Date.now() + CONFIG.CACHE_TTL });
+const getCache = (h) => {
+  const c = domainCache.get(h);
+  if (!c || Date.now() > c.expires) return null;
+  return c.data;
+};
 
 /* ======================================================
    🛰️ FUNÇÃO: BUSCA DOMÍNIO NO SUPABASE
@@ -57,22 +51,15 @@ async function getDomainData(host) {
     const headers = {
       apikey: CONFIG.SUPABASE_KEY.trim(),
       Authorization: `Bearer ${CONFIG.SUPABASE_KEY.trim()}`,
-      "Content-Type": "application/json",
       Accept: "application/json",
     };
 
-    console.log(`🟢 Consultando Supabase → ${host}`);
-
-    const res = await fetch(
-      `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
-      { headers, signal: controller.signal }
-    );
-
+    const url = `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`;
+    const res = await fetch(url, { headers, signal: controller.signal });
     clearTimeout(timeout);
 
     if (!res.ok) {
-      const errText = await res.text();
-      console.error(`❌ [Supabase ${res.status}] ${errText}`);
+      console.error(`❌ Supabase ${res.status}: ${await res.text()}`);
       return null;
     }
 
@@ -82,11 +69,11 @@ async function getDomainData(host) {
       setCache(host, row);
       console.log(`✅ Domínio ativo: ${host} → slug "${row.slug}"`);
       return row;
-    } else {
-      console.warn(`⚠️ Domínio não encontrado ou inativo: ${host}`);
     }
+
+    console.warn(`⚠️ Domínio encontrado mas inativo: ${host}`);
   } catch (err) {
-    console.error(`⚠️ Falha Supabase: ${err.name} | ${err.message}`);
+    console.error(`⚠️ Erro Supabase: ${err.message}`);
   }
 
   return null;
@@ -110,40 +97,37 @@ const isStatic = (path) => STATIC_PATHS.some((rx) => rx.test(path));
    🧭 MIDDLEWARE PRINCIPAL
 ====================================================== */
 app.use(async (req, res, next) => {
-  const originalHost = req.headers.host?.trim().toLowerCase() || "";
-  const cleanHost = originalHost.replace(/^www\./, "");
+  const host = req.headers.host?.trim().toLowerCase() || "";
+  const cleanHost = host.replace(/^www\./, "");
   const path = req.path;
 
-  console.log(`🌐 Requisição recebida: ${cleanHost} | Caminho: ${path}`);
+  console.log(`🌐 ${cleanHost} → ${path}`);
 
-  // Página de status
-  if (!cleanHost || cleanHost.includes("railway.app")) {
-    return res
-      .status(200)
-      .send("✅ Proxy ativo e aguardando conexões Cloudflare / DNS");
+  if (!cleanHost) return res.status(200).send("✅ Proxy ativo e aguardando domínios");
+
+  if (path === "/__debug") {
+    const info = await getDomainData(cleanHost);
+    return res.json({ host: cleanHost, slug: info?.slug || null, status: info?.status || "unknown" });
   }
 
   const domainData = await getDomainData(cleanHost);
-
   if (!domainData) {
-    console.warn(`⚠️ Domínio não configurado ou inativo: ${cleanHost}`);
-    return res.status(404).send(`
-      <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
-      <h2>⚠️ Domínio não configurado</h2>
-      <p>${cleanHost} ainda não foi ativado no Catálogo Virtual.</p>
-      </body></html>
-    `);
+    console.warn(`⚠️ Domínio não configurado: ${cleanHost}`);
+    return res.status(404).send(`<h1>Domínio não configurado: ${cleanHost}</h1>`);
   }
 
-  // 🔍 Redirecionamento correto com slug
+  const slug = domainData.slug;
   let target;
+
+  // Roteamento inteligente
   if (isStatic(path)) {
     target = CONFIG.ORIGIN;
   } else if (path === "/" || path === "") {
-    target = `${CONFIG.ORIGIN}/s/${domainData.slug}`;
+    target = `${CONFIG.ORIGIN}/s/${slug}`;
+  } else if (path.startsWith(`/s/${slug}`)) {
+    target = CONFIG.ORIGIN;
   } else {
-    // Exemplo: /contato → /s/slug/contato
-    target = `${CONFIG.ORIGIN}/s/${domainData.slug}${path}`;
+    target = `${CONFIG.ORIGIN}/s/${slug}${path}`;
   }
 
   console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
@@ -156,19 +140,13 @@ app.use(async (req, res, next) => {
     xfwd: true,
     proxyTimeout: 10000,
     headers: {
-      "X-Forwarded-Host": originalHost,
+      "X-Forwarded-Host": host,
       "X-Forwarded-Proto": "https",
       "User-Agent": req.headers["user-agent"] || "CatalogoProxy",
     },
     onError(err, req, res) {
-      console.error(`❌ ProxyError [${cleanHost}]`, err.message);
-      res.status(502).send(`
-        <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
-        <h2>❌ Erro temporário</h2>
-        <p>Não foi possível carregar a loja de <b>${cleanHost}</b>.</p>
-        <p>${err.message}</p>
-        </body></html>
-      `);
+      console.error(`❌ ProxyError ${cleanHost}: ${err.message}`);
+      res.status(502).send(`<h2>Erro temporário ao acessar ${cleanHost}</h2><p>${err.message}</p>`);
     },
   })(req, res, next);
 });
