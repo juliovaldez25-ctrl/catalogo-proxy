@@ -1,3 +1,8 @@
+/**
+ * 🔥 Proxy Reverso - Catálogo Virtual
+ * Versão final: sem JWT, com redirecionamento correto /s/slug e logs aprimorados
+ */
+
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import fetch from "node-fetch";
@@ -57,10 +62,6 @@ async function getDomainData(host) {
     };
 
     console.log(`🟢 Consultando Supabase → ${host}`);
-    console.log("🔑 Headers enviados (ocultos parcialmente):", {
-      apikey: headers.apikey.slice(0, 20) + "...",
-      Authorization: headers.Authorization.slice(0, 20) + "...",
-    });
 
     const res = await fetch(
       `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
@@ -115,7 +116,7 @@ app.use(async (req, res, next) => {
 
   console.log(`🌐 Requisição recebida: ${cleanHost} | Caminho: ${path}`);
 
-  // Página de status (teste rápido)
+  // Página de status
   if (!cleanHost || cleanHost.includes("railway.app")) {
     return res
       .status(200)
@@ -134,9 +135,16 @@ app.use(async (req, res, next) => {
     `);
   }
 
-  const target = isStatic(path)
-    ? CONFIG.ORIGIN
-    : `${CONFIG.ORIGIN}/s/${domainData.slug}`;
+  // 🔍 Redirecionamento correto com slug
+  let target;
+  if (isStatic(path)) {
+    target = CONFIG.ORIGIN;
+  } else if (path === "/" || path === "") {
+    target = `${CONFIG.ORIGIN}/s/${domainData.slug}`;
+  } else {
+    // Exemplo: /contato → /s/slug/contato
+    target = `${CONFIG.ORIGIN}/s/${domainData.slug}${path}`;
+  }
 
   console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
 
