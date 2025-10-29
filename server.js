@@ -4,9 +4,6 @@ import fetch from "node-fetch";
 
 const app = express();
 
-/* ======================================================
-   CONFIGURAÇÕES
-====================================================== */
 const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
   SUPABASE_KEY:
@@ -16,9 +13,7 @@ const CONFIG = {
   PORT: process.env.PORT || 8080,
 };
 
-/* ======================================================
-   CACHE LOCAL
-====================================================== */
+// Cache simples
 const cache = new Map();
 const setCache = (h, d) => cache.set(h, { data: d, exp: Date.now() + CONFIG.CACHE_TTL });
 const getCache = (h) => {
@@ -27,23 +22,20 @@ const getCache = (h) => {
   return c.data;
 };
 
-/* ======================================================
-   CONSULTA SUPABASE
-====================================================== */
+// Consulta domínio no Supabase
 async function getDomainData(host) {
-  if (!host) return null;
   const cached = getCache(host);
   if (cached) return cached;
 
   try {
-    const headers = {
-      apikey: CONFIG.SUPABASE_KEY.trim(),
-      Authorization: `Bearer ${CONFIG.SUPABASE_KEY.trim()}`,
-    };
-
     const res = await fetch(
       `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
-      { headers }
+      {
+        headers: {
+          apikey: CONFIG.SUPABASE_KEY,
+          Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
+        },
+      }
     );
 
     if (!res.ok) {
@@ -61,57 +53,47 @@ async function getDomainData(host) {
   } catch (err) {
     console.error(`⚠️ Erro Supabase: ${err.message}`);
   }
-
   return null;
 }
 
-/* ======================================================
-   PROXY PRINCIPAL
-====================================================== */
+// Middleware principal
 app.use(async (req, res, next) => {
   const host = req.headers.host?.trim().toLowerCase();
-  const cleanHost = host?.replace(/^www\./, "");
   const path = req.path;
 
-  if (!cleanHost) return res.status(200).send("✅ Proxy ativo e aguardando conexões");
+  if (!host) return res.status(200).send("✅ Proxy ativo");
 
- // 🔹 Proxy completo para assets (corrige CORS e MIME)
-if (path.startsWith("/assets/")) {
-  return createProxyMiddleware({
-    target: CONFIG.ORIGIN,
-    changeOrigin: true,
-    followRedirects: true,
-    onProxyRes(proxyRes, req, res) {
-      // Força cabeçalhos CORS e tipo correto
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Origin, Content-Type, Accept");
-      
-      // Corrige MIME type, se necessário
-      const contentType = proxyRes.headers["content-type"];
-      if (!contentType && req.url.endsWith(".css")) {
-        res.setHeader("Content-Type", "text/css");
-      }
-      if (!contentType && req.url.endsWith(".js")) {
-        res.setHeader("Content-Type", "application/javascript");
-      }
-    },
-  })(req, res, next);
-}
-
-
-  // 🔹 Busca slug no Supabase
-  const domainData = await getDomainData(cleanHost);
-  if (!domainData) {
-    return res.status(404).send(`<h1>⚠️ Domínio não configurado: ${cleanHost}</h1>`);
-  }
+  const domainData = await getDomainData(host);
+  if (!domainData)
+    return res
+      .status(404)
+      .send(`<h1>⚠️ Domínio não configurado: ${host}</h1>`);
 
   const slug = domainData.slug;
-  const target = `${CONFIG.ORIGIN}/s/${slug}`;
 
-  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
+  // Proxy para assets
+  if (path.startsWith("/assets/")) {
+    return createProxyMiddleware({
+      target: CONFIG.ORIGIN,
+      changeOrigin: true,
+      onProxyRes(proxyRes, req, res) {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+      },
+    })(req, res, next);
+  }
 
-  // 🔹 Proxy da loja completa
+  // Proxy para API
+  if (path.startsWith("/api") || path.startsWith("/~api")) {
+    return createProxyMiddleware({
+      target: CONFIG.ORIGIN,
+      changeOrigin: true,
+      onProxyRes(proxyRes, req, res) {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+      },
+    })(req, res, next);
+  }
+
+  // Proxy principal - intercepta HTML
   return createProxyMiddleware({
     target: CONFIG.ORIGIN,
     changeOrigin: true,
@@ -121,29 +103,28 @@ if (path.startsWith("/assets/")) {
       if (contentType && contentType.includes("text/html")) {
         let html = buffer.toString("utf8");
 
-        // injeta metadados e corrige links
+        // Reescreve caminhos relativos
+        html = html.replaceAll('href="/assets', 'href="https://catalogovirtual.app.br/assets');
+        html = html.replaceAll('src="/assets', 'src="https://catalogovirtual.app.br/assets');
+
+        // Injeta slug para renderizar a loja certa
         html = html.replace(
           "<head>",
           `<head>
              <base href="/" />
              <meta name="store-slug" content="${slug}" />
-             <script>window.STORE_SLUG="${slug}";</script>`
+             <script>window.STORE_SLUG="${slug}"</script>`
         );
 
         return html;
       }
       return buffer;
     }),
-    pathRewrite: (path) => {
-      if (path === "/" || path === "") return `/s/${slug}`;
-      return `/s/${slug}${path}`;
-    },
+    pathRewrite: (path) => `/s/${slug}`,
   })(req, res, next);
 });
 
-/* ======================================================
-   INICIA SERVIDOR
-====================================================== */
-app.listen(CONFIG.PORT, "0.0.0.0", () => {
-  console.log(`🚀 Proxy reverso ativo na porta ${CONFIG.PORT}`);
-});
+// Inicia servidor
+app.listen(CONFIG.PORT, "0.0.0.0", () =>
+  console.log(`🚀 Proxy reverso ativo na porta ${CONFIG.PORT}`)
+);
