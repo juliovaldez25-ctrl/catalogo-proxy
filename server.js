@@ -15,7 +15,7 @@ const CONFIG = {
   EDGE_FUNCTION: "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/cors-allow",
   ORIGIN: "https://catalogovirtual.app.br",
   CACHE_TTL: 1000 * 60 * 10, // 10 minutos
-  TIMEOUT: 7000,
+  TIMEOUT: 7000, // 7 segundos
   PORT: process.env.PORT || 8080,
 };
 
@@ -37,7 +37,7 @@ app.use((req, res, next) => {
 });
 
 /* ======================================================
-   🧠 CACHE DE DOMÍNIOS
+   🧠 CACHE DE DOMÍNIOS (com TTL)
 ====================================================== */
 const domainCache = new Map();
 function setCache(host, data) {
@@ -54,24 +54,16 @@ function getCache(host) {
 
 /* ======================================================
    🛰️ FUNÇÃO: BUSCA DOMÍNIO NO SUPABASE
-   Tenta 1️⃣ Edge Function → 2️⃣ REST fallback
 ====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
-
   const cached = getCache(host);
   if (cached) return cached;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
-
   try {
-    // 1️⃣ Tenta a Edge Function (cors-allow)
+    // 1️⃣ Tenta Edge Function
     const edge = await fetch(`${CONFIG.EDGE_FUNCTION}?domain=${host}`, {
-      headers: {
-        Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
-      },
-      signal: controller.signal,
+      headers: { Authorization: `Bearer ${CONFIG.SUPABASE_KEY}` },
     });
 
     if (edge.ok) {
@@ -84,7 +76,7 @@ async function getDomainData(host) {
       console.warn(`⚠️ Edge Function falhou: ${edge.status}`);
     }
 
-    // 2️⃣ Fallback direto no Supabase REST
+    // 2️⃣ Fallback: REST Supabase
     const res = await fetch(
       `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
       {
@@ -92,13 +84,11 @@ async function getDomainData(host) {
           apikey: CONFIG.SUPABASE_KEY,
           Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
         },
-        signal: controller.signal,
       }
     );
 
-    clearTimeout(timeout);
     if (!res.ok) {
-      console.error(`❌ [Supabase ${res.status}] ${await res.text()}`);
+      console.error(`❌ Supabase ${res.status}: ${await res.text()}`);
       return null;
     }
 
@@ -139,6 +129,7 @@ app.use(async (req, res, next) => {
 
   console.log(`🌐 ${cleanHost} → ${path}`);
 
+  // Página de status
   if (!cleanHost || cleanHost.includes("railway.app")) {
     return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
@@ -182,10 +173,18 @@ app.use(async (req, res, next) => {
 
         if (contentType.includes("text/html")) {
           let html = buffer.toString("utf8");
+
+          // ✅ Injeta STORE_SLUG logo no início do <head>
           html = html.replace(
-            "</head>",
-            `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
+            "<head>",
+            `<head>\n<script>window.STORE_SLUG="${domainData.slug}";</script>`
           );
+
+          // 🔧 Reescreve caminhos relativos → absolutos
+          html = html
+            .replace(/src="\/assets\//g, 'src="https://catalogovirtual.app.br/assets/')
+            .replace(/href="\/assets\//g, 'href="https://catalogovirtual.app.br/assets/');
+
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           res.end(html);
         } else {
