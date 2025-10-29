@@ -5,7 +5,7 @@ import fetch from "node-fetch";
 const app = express();
 
 /* ======================================================
-   CONFIG PRINCIPAL
+   CONFIGURAÇÕES
 ====================================================== */
 const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
@@ -28,7 +28,7 @@ const getCache = (h) => {
 };
 
 /* ======================================================
-   CONSULTA AO SUPABASE
+   CONSULTA SUPABASE
 ====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
@@ -66,13 +66,6 @@ async function getDomainData(host) {
 }
 
 /* ======================================================
-   DETECTA ASSETS
-====================================================== */
-function isAsset(path) {
-  return /\.(js|css|png|jpg|jpeg|gif|svg|ico|webp|json|woff2?)$/i.test(path);
-}
-
-/* ======================================================
    PROXY PRINCIPAL
 ====================================================== */
 app.use(async (req, res, next) => {
@@ -82,52 +75,50 @@ app.use(async (req, res, next) => {
 
   if (!cleanHost) return res.status(200).send("✅ Proxy ativo e aguardando conexões");
 
+  // 🔹 Assets (css/js/img) sempre vão direto pro domínio principal
+  if (path.startsWith("/assets/")) {
+    const assetUrl = `${CONFIG.ORIGIN}${path}`;
+    console.log(`🪄 Redirecionando asset: ${path} → ${assetUrl}`);
+    return res.redirect(assetUrl);
+  }
+
+  // 🔹 Busca slug no Supabase
   const domainData = await getDomainData(cleanHost);
   if (!domainData) {
-    return res.status(404).send(`<h1>Domínio não configurado: ${cleanHost}</h1>`);
+    return res.status(404).send(`<h1>⚠️ Domínio não configurado: ${cleanHost}</h1>`);
   }
 
   const slug = domainData.slug;
-  const target = CONFIG.ORIGIN;
-  const asset = isAsset(path);
+  const target = `${CONFIG.ORIGIN}/s/${slug}`;
 
-  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}/s/${slug}${asset ? path : ""}`);
+  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
 
+  // 🔹 Proxy da loja completa
   return createProxyMiddleware({
-    target,
+    target: CONFIG.ORIGIN,
     changeOrigin: true,
-    selfHandleResponse: !asset,
-    onProxyRes: !asset
-      ? responseInterceptor(async (buffer, proxyRes, req, res) => {
-          const contentType = proxyRes.headers["content-type"];
-          if (contentType && contentType.includes("text/html")) {
-            let html = buffer.toString("utf8");
-            // Corrige assets e injeta meta
-            html = html
-              .replaceAll(`/s/${slug}/assets/`, `/assets/`)
-              .replaceAll(`href="/s/${slug}`, `href="/"`)
-              .replaceAll(`src="/s/${slug}`, `src="/"`)
-              .replace(
-                "<head>",
-                `<head>
-                   <base href="/" />
-                   <meta name="store-slug" content="${slug}" />
-                   <script>window.STORE_SLUG="${slug}";</script>`
-              );
-            return html;
-          }
-          return buffer;
-        })
-      : undefined,
+    selfHandleResponse: true,
+    onProxyRes: responseInterceptor(async (buffer, proxyRes, req, res) => {
+      const contentType = proxyRes.headers["content-type"];
+      if (contentType && contentType.includes("text/html")) {
+        let html = buffer.toString("utf8");
+
+        // injeta metadados e corrige links
+        html = html.replace(
+          "<head>",
+          `<head>
+             <base href="/" />
+             <meta name="store-slug" content="${slug}" />
+             <script>window.STORE_SLUG="${slug}";</script>`
+        );
+
+        return html;
+      }
+      return buffer;
+    }),
     pathRewrite: (path) => {
-      // ✅ Corrige caminhos dos assets
-      if (asset) return `/s/${slug}${path}`;
       if (path === "/" || path === "") return `/s/${slug}`;
       return `/s/${slug}${path}`;
-    },
-    headers: {
-      "X-Forwarded-Host": host,
-      "X-Store-Slug": slug,
     },
   })(req, res, next);
 });
