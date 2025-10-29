@@ -71,16 +71,36 @@ app.use(async (req, res, next) => {
 
   const slug = domainData.slug;
 
-  // Proxy para assets
-  if (path.startsWith("/assets/")) {
-    return createProxyMiddleware({
-      target: CONFIG.ORIGIN,
-      changeOrigin: true,
-      onProxyRes(proxyRes, req, res) {
-        res.setHeader("Access-Control-Allow-Origin", "*");
-      },
-    })(req, res, next);
-  }
+// 🔹 Proxy completo para assets (resolve CORS e MIME)
+if (path.startsWith("/assets/")) {
+  console.log(`🪄 Proxy interno de asset: ${path}`);
+  return createProxyMiddleware({
+    target: CONFIG.ORIGIN,
+    changeOrigin: true,
+    followRedirects: true,
+    secure: false,
+    onProxyReq(proxyReq, req, res) {
+      // Remove cabeçalhos de origem que causam CORS
+      proxyReq.removeHeader("origin");
+      proxyReq.removeHeader("referer");
+    },
+    onProxyRes(proxyRes, req, res) {
+      // Injeta cabeçalhos corretos
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Origin, Content-Type, Accept");
+
+      // Corrige MIME
+      const url = req.url;
+      if (url.endsWith(".css")) res.setHeader("Content-Type", "text/css");
+      if (url.endsWith(".js")) res.setHeader("Content-Type", "application/javascript");
+      if (url.endsWith(".jpg") || url.endsWith(".jpeg")) res.setHeader("Content-Type", "image/jpeg");
+      if (url.endsWith(".png")) res.setHeader("Content-Type", "image/png");
+      if (url.endsWith(".svg")) res.setHeader("Content-Type", "image/svg+xml");
+    },
+  })(req, res, next);
+}
+
 
   // Proxy para API
   if (path.startsWith("/api") || path.startsWith("/~api")) {
