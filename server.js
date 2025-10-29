@@ -1,31 +1,65 @@
 import express from "express";
-import { createProxyMiddleware, responseInterceptor } from "http-proxy-middleware";
+import { createProxyMiddleware } from "http-proxy-middleware";
 import fetch from "node-fetch";
+import jwt from "jsonwebtoken";
 
 const app = express();
 
+/* ======================================================
+   🔧 CONFIGURAÇÕES PRINCIPAIS
+====================================================== */
 const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
   SUPABASE_KEY:
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
   ORIGIN: "https://catalogovirtual.app.br",
-  CACHE_TTL: 1000 * 60 * 10,
+  CACHE_TTL: 1000 * 60 * 10, // 10 min
+  TIMEOUT: 7000,
   PORT: process.env.PORT || 8080,
 };
 
-// Cache simples
-const cache = new Map();
-const setCache = (h, d) => cache.set(h, { data: d, exp: Date.now() + CONFIG.CACHE_TTL });
-const getCache = (h) => {
-  const c = cache.get(h);
-  if (!c || Date.now() > c.exp) return null;
-  return c.data;
-};
+/* ======================================================
+   🔐 JWT TEMPORÁRIO PARA SUPABASE
+====================================================== */
+function generateJWT() {
+  const payload = {
+    role: "service_role",
+    iss: "catalogo-proxy",
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 60 * 5,
+  };
+  return jwt.sign(payload, CONFIG.SUPABASE_KEY, { algorithm: "HS256" });
+}
 
-// Consulta domínio no Supabase
+/* ======================================================
+   💾 CACHE DE DOMÍNIOS (com TTL)
+====================================================== */
+const domainCache = new Map();
+function setCache(host, data) {
+  domainCache.set(host, { data, expires: Date.now() + CONFIG.CACHE_TTL });
+}
+function getCache(host) {
+  const cached = domainCache.get(host);
+  if (!cached) return null;
+  if (Date.now() > cached.expires) {
+    domainCache.delete(host);
+    return null;
+  }
+  return cached.data;
+}
+
+/* ======================================================
+   🛰️ FUNÇÃO: BUSCA DOMÍNIO NO SUPABASE
+====================================================== */
 async function getDomainData(host) {
+  if (!host) return null;
+
   const cached = getCache(host);
   if (cached) return cached;
+
+  const token = generateJWT();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
 
   try {
     const res = await fetch(
@@ -33,13 +67,15 @@ async function getDomainData(host) {
       {
         headers: {
           apikey: CONFIG.SUPABASE_KEY,
-          Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
+          Authorization: `Bearer ${token}`,
         },
+        signal: controller.signal,
       }
     );
 
+    clearTimeout(timeout);
     if (!res.ok) {
-      console.error(`❌ Supabase ${res.status}: ${await res.text()}`);
+      console.error(`❌ [Supabase ${res.status}] ${await res.text()}`);
       return null;
     }
 
@@ -47,104 +83,135 @@ async function getDomainData(host) {
     const row = data?.[0];
     if (row && ["active", "verified"].includes(row.status)) {
       setCache(host, row);
-      console.log(`✅ Domínio ativo: ${host} → slug "${row.slug}"`);
       return row;
     }
   } catch (err) {
-    console.error(`⚠️ Erro Supabase: ${err.message}`);
+    console.error(`⚠️ Falha Supabase: ${err.name} | ${err.message}`);
   }
+
   return null;
 }
 
-// Middleware principal
+/* ======================================================
+   🌍 LIBERA CORS GLOBAL
+====================================================== */
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, OPTIONS, PUT, DELETE"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Requested-With"
+  );
+  next();
+});
+
+/* ======================================================
+   🚦 ROTAS ESTÁTICAS /assets
+====================================================== */
+const STATIC_PATHS = [
+  /^\/assets\//,
+  /^\/favicon\.ico$/,
+  /^\/robots\.txt$/,
+  /^\/sitemap\.xml$/,
+  /^\/site\.webmanifest$/,
+  /^\/~flock\.js$/,
+  /^\/~api\//,
+];
+const isStatic = (path) => STATIC_PATHS.some((rx) => rx.test(path));
+
+/* ======================================================
+   🧭 MIDDLEWARE PRINCIPAL
+====================================================== */
 app.use(async (req, res, next) => {
-  const host = req.headers.host?.trim().toLowerCase();
+  const originalHost = req.headers.host?.trim().toLowerCase() || "";
+  const cleanHost = originalHost.replace(/^www\./, "");
   const path = req.path;
 
-  if (!host) return res.status(200).send("✅ Proxy ativo");
+  console.log(`🌐 ${cleanHost} → ${path}`);
 
-  const domainData = await getDomainData(host);
-  if (!domainData)
-    return res
-      .status(404)
-      .send(`<h1>⚠️ Domínio não configurado: ${host}</h1>`);
+  // Status
+  if (!cleanHost || cleanHost.includes("railway.app")) {
+    return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
+  }
 
-  const slug = domainData.slug;
+  const domainData = await getDomainData(cleanHost);
 
-// 🔹 Proxy completo para assets (resolve CORS e MIME)
-if (path.startsWith("/assets/")) {
-  console.log(`🪄 Proxy interno de asset: ${path}`);
-  return createProxyMiddleware({
-    target: CONFIG.ORIGIN,
-    changeOrigin: true,
-    followRedirects: true,
-    secure: false,
-    onProxyReq(proxyReq, req, res) {
-      // Remove cabeçalhos de origem que causam CORS
-      proxyReq.removeHeader("origin");
-      proxyReq.removeHeader("referer");
-    },
-    onProxyRes(proxyRes, req, res) {
-      // Injeta cabeçalhos corretos
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Origin, Content-Type, Accept");
+  if (!domainData) {
+    console.warn(`⚠️ Domínio não configurado: ${cleanHost}`);
+    return res.status(404).send(`
+      <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
+      <h2>⚠️ Domínio não configurado</h2>
+      <p>${cleanHost} ainda não foi ativado no Catálogo Virtual.</p>
+      </body></html>
+    `);
+  }
 
-      // Corrige MIME
-      const url = req.url;
-      if (url.endsWith(".css")) res.setHeader("Content-Type", "text/css");
-      if (url.endsWith(".js")) res.setHeader("Content-Type", "application/javascript");
-      if (url.endsWith(".jpg") || url.endsWith(".jpeg")) res.setHeader("Content-Type", "image/jpeg");
-      if (url.endsWith(".png")) res.setHeader("Content-Type", "image/png");
-      if (url.endsWith(".svg")) res.setHeader("Content-Type", "image/svg+xml");
-    },
-  })(req, res, next);
-}
-
-
-  // Proxy para API
-  if (path.startsWith("/api") || path.startsWith("/~api")) {
+  // ✅ Para arquivos estáticos, usar o ORIGIN direto (com CORS)
+  if (isStatic(path)) {
+    const target = `${CONFIG.ORIGIN}${path}`;
+    console.log(`📦 Asset → ${target}`);
     return createProxyMiddleware({
-      target: CONFIG.ORIGIN,
+      target,
       changeOrigin: true,
-      onProxyRes(proxyRes, req, res) {
-        res.setHeader("Access-Control-Allow-Origin", "*");
-      },
+      secure: true,
+      followRedirects: true,
+      xfwd: true,
     })(req, res, next);
   }
 
-  // Proxy principal - intercepta HTML
+  // ✅ Para páginas, injetar slug no HTML
+  const target = `${CONFIG.ORIGIN}/s/${domainData.slug}`;
+  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
+
   return createProxyMiddleware({
-    target: CONFIG.ORIGIN,
+    target,
     changeOrigin: true,
+    secure: true,
+    followRedirects: true,
+    xfwd: true,
     selfHandleResponse: true,
-    onProxyRes: responseInterceptor(async (buffer, proxyRes, req, res) => {
-      const contentType = proxyRes.headers["content-type"];
-      if (contentType && contentType.includes("text/html")) {
-        let html = buffer.toString("utf8");
+    onProxyRes: async (proxyRes, req, res) => {
+      let body = "";
+      proxyRes.on("data", (chunk) => (body += chunk));
+      proxyRes.on("end", () => {
+        res.status(proxyRes.statusCode);
+        for (const [key, value] of Object.entries(proxyRes.headers)) {
+          if (key.toLowerCase() !== "content-length") res.setHeader(key, value);
+        }
 
-        // Reescreve caminhos relativos
-        html = html.replaceAll('href="/assets', 'href="https://catalogovirtual.app.br/assets');
-        html = html.replaceAll('src="/assets', 'src="https://catalogovirtual.app.br/assets');
+        // 🧩 Se for HTML, injeta o STORE_SLUG
+        if (
+          proxyRes.headers["content-type"]?.includes("text/html") &&
+          body.includes("<div id=\"root\"></div>")
+        ) {
+          body = body.replace(
+            "</head>",
+            `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
+          );
+        }
 
-        // Injeta slug para renderizar a loja certa
-        html = html.replace(
-          "<head>",
-          `<head>
-             <base href="/" />
-             <meta name="store-slug" content="${slug}" />
-             <script>window.STORE_SLUG="${slug}"</script>`
-        );
-
-        return html;
-      }
-      return buffer;
-    }),
-    pathRewrite: (path) => `/s/${slug}`,
+        res.send(body);
+      });
+    },
+    onError(err, req, res) {
+      console.error(`❌ ProxyError [${cleanHost}]`, err.message);
+      res.status(502).send(`
+        <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
+        <h2>❌ Erro temporário</h2>
+        <p>Não foi possível carregar a loja de <b>${cleanHost}</b>.</p>
+        <p>${err.message}</p>
+        </body></html>
+      `);
+    },
   })(req, res, next);
 });
 
-// Inicia servidor
-app.listen(CONFIG.PORT, "0.0.0.0", () =>
-  console.log(`🚀 Proxy reverso ativo na porta ${CONFIG.PORT}`)
-);
+/* ======================================================
+   🚀 INICIALIZA SERVIDOR
+====================================================== */
+app.listen(CONFIG.PORT, "0.0.0.0", () => {
+  console.log(`🚀 Proxy reverso ativo na porta ${CONFIG.PORT}`);
+});
