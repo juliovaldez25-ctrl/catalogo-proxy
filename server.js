@@ -1,16 +1,18 @@
 /**
- * 🧱 Proxy Reverso - Catálogo Virtual
- * 🚀 Redirecionamento robusto + reescrita automática de rotas
+ * 🌎 Proxy Reverso - Catálogo Virtual (versão definitiva)
+ * ✅ Mantém domínio personalizado
+ * ✅ Reescreve /s/slug no HTML
+ * ✅ Corrige assets e mantém SPA funcional
  */
 
 import express from "express";
-import { createProxyMiddleware } from "http-proxy-middleware";
+import { createProxyMiddleware, responseInterceptor } from "http-proxy-middleware";
 import fetch from "node-fetch";
 
 const app = express();
 
 /* ======================================================
-   ⚙️ CONFIGURAÇÕES
+   CONFIGURAÇÕES
 ====================================================== */
 const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
@@ -18,23 +20,22 @@ const CONFIG = {
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
   ORIGIN: "https://catalogovirtual.app.br",
   CACHE_TTL: 1000 * 60 * 10,
-  TIMEOUT: 7000,
   PORT: process.env.PORT || 8080,
 };
 
 /* ======================================================
-   🧠 CACHE
+   CACHE LOCAL
 ====================================================== */
-const cache = new Map();
-const setCache = (host, data) => cache.set(host, { data, exp: Date.now() + CONFIG.CACHE_TTL });
-const getCache = (host) => {
-  const c = cache.get(host);
+const domainCache = new Map();
+const setCache = (h, d) => domainCache.set(h, { data: d, exp: Date.now() + CONFIG.CACHE_TTL });
+const getCache = (h) => {
+  const c = domainCache.get(h);
   if (!c || Date.now() > c.exp) return null;
   return c.data;
 };
 
 /* ======================================================
-   🔍 FUNÇÃO DE BUSCA SUPABASE
+   BUSCA NO SUPABASE
 ====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
@@ -72,7 +73,7 @@ async function getDomainData(host) {
 }
 
 /* ======================================================
-   🧭 MIDDLEWARE PRINCIPAL
+   PROXY PRINCIPAL
 ====================================================== */
 app.use(async (req, res, next) => {
   const host = req.headers.host?.trim().toLowerCase();
@@ -83,33 +84,43 @@ app.use(async (req, res, next) => {
 
   const domainData = await getDomainData(cleanHost);
   if (!domainData) {
-    console.warn(`⚠️ Domínio não configurado: ${cleanHost}`);
     return res.status(404).send(`<h1>Domínio não configurado: ${cleanHost}</h1>`);
   }
 
   const slug = domainData.slug;
-
   console.log(`➡️ Proxy: ${cleanHost}${path} → ${CONFIG.ORIGIN}/s/${slug}`);
 
+  // Intercepta respostas HTML e reescreve caminhos
   return createProxyMiddleware({
     target: CONFIG.ORIGIN,
     changeOrigin: true,
-    xfwd: true,
-    followRedirects: true,
-    proxyTimeout: 10000,
-    pathRewrite: (path, req) => {
+    selfHandleResponse: true, // necessário para interceptar HTML
+    onProxyRes: responseInterceptor(async (buffer, proxyRes, req, res) => {
+      const contentType = proxyRes.headers["content-type"];
+      if (contentType && contentType.includes("text/html")) {
+        let html = buffer.toString("utf8");
+        // Reescreve rotas internas e assets
+        html = html
+          .replaceAll(`/s/${slug}/assets/`, `/assets/`)
+          .replaceAll(`href="/s/${slug}`, `href="/"`)
+          .replaceAll(`src="/s/${slug}`, `src="/"`);
+        return html;
+      }
+      return buffer;
+    }),
+    pathRewrite: (path) => {
       if (path === "/" || path === "") return `/s/${slug}`;
       return path.startsWith(`/s/${slug}`) ? path : `/s/${slug}${path}`;
     },
-    onError(err, req, res) {
-      console.error(`❌ ProxyError: ${err.message}`);
-      res.status(502).send(`<h2>Erro temporário</h2><p>${err.message}</p>`);
+    headers: {
+      "X-Forwarded-Host": host,
+      "X-Store-Slug": slug,
     },
   })(req, res, next);
 });
 
 /* ======================================================
-   🚀 START
+   START
 ====================================================== */
 app.listen(CONFIG.PORT, "0.0.0.0", () => {
   console.log(`🚀 Proxy reverso ativo na porta ${CONFIG.PORT}`);
