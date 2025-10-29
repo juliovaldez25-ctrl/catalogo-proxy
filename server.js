@@ -150,52 +150,59 @@ app.use(async (req, res, next) => {
     })(req, res, next);
   }
 
-  // Se for página, injeta STORE_SLUG
-  const target = `${CONFIG.ORIGIN}/s/${domainData.slug}`;
-  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
+  // ✅ Proxy para páginas React (com injeção do slug e fix gzip)
+const target = `${CONFIG.ORIGIN}/s/${domainData.slug}`;
+console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
 
-  return createProxyMiddleware({
-    target,
-    changeOrigin: true,
-    secure: true,
-    followRedirects: true,
-    xfwd: true,
-    selfHandleResponse: true,
-    onProxyRes: async (proxyRes, req, res) => {
-      let body = "";
-      proxyRes.on("data", (chunk) => (body += chunk));
-      proxyRes.on("end", () => {
-        res.status(proxyRes.statusCode);
-        for (const [key, value] of Object.entries(proxyRes.headers)) {
-          if (key.toLowerCase() !== "content-length") res.setHeader(key, value);
-        }
+return createProxyMiddleware({
+  target,
+  changeOrigin: true,
+  secure: true,
+  followRedirects: true,
+  xfwd: true,
 
-        // 🧩 Injeta o slug automaticamente
-        if (
-          proxyRes.headers["content-type"]?.includes("text/html") &&
-          body.includes('<div id="root"></div>')
-        ) {
-          body = body.replace(
+  onProxyRes: (proxyRes, req, res) => {
+    // 🔧 Remove o content-encoding para evitar erro gzip
+    const enc = proxyRes.headers["content-encoding"];
+    if (enc) delete proxyRes.headers["content-encoding"];
+
+    let body = Buffer.from([]);
+    proxyRes.on("data", (chunk) => {
+      body = Buffer.concat([body, chunk]);
+    });
+
+    proxyRes.on("end", () => {
+      const contentType = proxyRes.headers["content-type"] || "";
+      const isHtml = contentType.includes("text/html");
+
+      if (isHtml) {
+        let html = body.toString("utf8");
+        if (html.includes('<div id="root"></div>')) {
+          html = html.replace(
             "</head>",
             `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
           );
         }
+        res.status(proxyRes.statusCode).send(html);
+      } else {
+        // 🔧 Repassa o resto (JS, JSON etc.) sem mexer
+        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        res.end(body);
+      }
+    });
+  },
 
-        res.send(body);
-      });
-    },
-    onError(err, req, res) {
-      console.error(`❌ ProxyError [${cleanHost}]`, err.message);
-      res.status(502).send(`
-        <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
-        <h2>❌ Erro temporário</h2>
-        <p>Não foi possível carregar a loja de <b>${cleanHost}</b>.</p>
-        <p>${err.message}</p>
-        </body></html>
-      `);
-    },
-  })(req, res, next);
-});
+  onError(err, req, res) {
+    console.error(`❌ ProxyError [${cleanHost}]`, err.message);
+    res.status(502).send(`
+      <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
+      <h2>❌ Erro temporário</h2>
+      <p>Não foi possível carregar a loja de <b>${cleanHost}</b>.</p>
+      <p>${err.message}</p>
+      </body></html>
+    `);
+  },
+})(req, res, next);
 
 /* ======================================================
    🚀 INICIALIZA SERVIDOR
