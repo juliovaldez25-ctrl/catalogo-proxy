@@ -24,8 +24,14 @@ const CONFIG = {
 ====================================================== */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
-  res.setHeader("Access-Control-Allow-Headers", "*");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, OPTIONS, PUT, DELETE"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Requested-With"
+  );
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
@@ -47,10 +53,11 @@ function getCache(host) {
 }
 
 /* ======================================================
-   🛰️ BUSCA DOMÍNIO VIA EDGE FUNCTION
+   🛰️ FUNÇÃO: BUSCA DOMÍNIO NO SUPABASE (Edge → REST)
 ====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
+
   const cached = getCache(host);
   if (cached) return cached;
 
@@ -58,31 +65,58 @@ async function getDomainData(host) {
   const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
 
   try {
+    // 1️⃣ Tenta a Edge Function
     const edge = await fetch(`${CONFIG.EDGE_FUNCTION}?domain=${host}`, {
-      headers: { Authorization: `Bearer ${CONFIG.SUPABASE_KEY}` },
+      headers: {
+        Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
+      },
       signal: controller.signal,
     });
-
-    clearTimeout(timeout);
 
     if (edge.ok) {
       const json = await edge.json();
       if (json?.slug) {
         setCache(host, json);
+        clearTimeout(timeout);
         return json;
       }
     } else {
       console.warn(`⚠️ Edge Function falhou: ${edge.status}`);
     }
+
+    // 2️⃣ Fallback direto no Supabase REST
+    const res = await fetch(
+      `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
+      {
+        headers: {
+          apikey: CONFIG.SUPABASE_KEY,
+          Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
+        },
+        signal: controller.signal,
+      }
+    );
+
+    clearTimeout(timeout);
+    if (!res.ok) {
+      console.error(`❌ [Supabase ${res.status}] ${await res.text()}`);
+      return null;
+    }
+
+    const data = await res.json();
+    const row = data?.[0];
+    if (row && ["active", "verified"].includes(row.status)) {
+      setCache(host, row);
+      return row;
+    }
   } catch (err) {
-    console.error(`⚠️ Erro ao buscar domínio via Edge: ${err.message}`);
+    console.error(`⚠️ Erro Supabase: ${err.name} | ${err.message}`);
   }
 
   return null;
 }
 
 /* ======================================================
-   🚦 MAPEAMENTO DE ROTAS ESTÁTICAS
+   🚦 ROTAS ESTÁTICAS
 ====================================================== */
 const STATIC_PATHS = [
   /^\/assets\//,
@@ -105,8 +139,11 @@ app.use(async (req, res, next) => {
 
   console.log(`🌐 ${cleanHost} → ${path}`);
 
+  // Página de status
   if (!cleanHost || cleanHost.includes("railway.app")) {
-    return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
+    return res
+      .status(200)
+      .send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
 
   const domainData = await getDomainData(cleanHost);
@@ -120,70 +157,61 @@ app.use(async (req, res, next) => {
     `);
   }
 
-  // ⚡ Reescreve rotas (assets, API e HTML)
-  const target = CONFIG.ORIGIN;
-  const injectSlug = !isStatic(path) && !path.startsWith("/~");
+  /* ======================================================
+     🔁 REGRAS DE REESCRITA
+  ======================================================= */
+  let target = CONFIG.ORIGIN;
+  let rewrittenPath = path;
 
-  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}${path}`);
+  // Se for uma rota React (ex: /cart, /checkout, etc)
+  if (!isStatic(path) && !path.startsWith("/s/") && !path.startsWith("/~")) {
+    rewrittenPath = `/s/${domainData.slug}${path}`;
+  }
+
+  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}${rewrittenPath}`);
 
   return createProxyMiddleware({
     target,
     changeOrigin: true,
     secure: true,
     xfwd: true,
-    selfHandleResponse: injectSlug,
-    pathRewrite: (p) =>
-      isStatic(p) || p.startsWith("/~") ? p : `/s/${domainData.slug}${p}`,
+    pathRewrite: () => rewrittenPath,
 
-    onProxyRes: injectSlug
-      ? async (proxyRes, req, res) => {
-          const enc = proxyRes.headers["content-encoding"];
-          const chunks = [];
+    onProxyRes(proxyRes, req, res) {
+      const enc = proxyRes.headers["content-encoding"];
+      const chunks = [];
 
-          proxyRes.on("data", (chunk) => chunks.push(chunk));
-          proxyRes.on("end", () => {
-            try {
-              let buffer = Buffer.concat(chunks);
-              const contentType = proxyRes.headers["content-type"] || "";
+      proxyRes.on("data", (chunk) => chunks.push(chunk));
+      proxyRes.on("end", () => {
+        let buffer = Buffer.concat(chunks);
+        const contentType = proxyRes.headers["content-type"] || "";
 
-              delete proxyRes.headers["content-encoding"];
-              delete proxyRes.headers["content-length"];
+        delete proxyRes.headers["content-encoding"];
+        delete proxyRes.headers["content-length"];
 
-              if (enc === "gzip") buffer = zlib.gunzipSync(buffer);
-              else if (enc === "br") buffer = zlib.brotliDecompressSync(buffer);
+        if (enc === "gzip") buffer = zlib.gunzipSync(buffer);
+        else if (enc === "br") buffer = zlib.brotliDecompressSync(buffer);
 
-              if (contentType.includes("text/html")) {
-                let html = buffer.toString("utf8");
-
-                // 🧩 Corrige URLs absolutas → relativas (para evitar CORS)
-                html = html
-                  .replace(/https:\/\/catalogovirtual\.app\.br\/assets\//g, "/assets/")
-                  .replace(/https:\/\/catalogovirtual\.app\.br\/~flock\.js/g, "/~flock.js")
-                  .replace(/https:\/\/catalogovirtual\.app\.br\/~api\//g, "/~api/")
-                  .replace("</head>", `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`);
-
-                res.writeHead(proxyRes.statusCode, {
-                  ...proxyRes.headers,
-                  "Access-Control-Allow-Origin": "*",
-                });
-                res.end(html);
-              } else {
-                res.writeHead(proxyRes.statusCode, {
-                  ...proxyRes.headers,
-                  "Access-Control-Allow-Origin": "*",
-                });
-                res.end(buffer);
-              }
-            } catch (e) {
-              console.error("⚠️ Falha ao processar HTML:", e.message);
-              res.writeHead(500, { "Content-Type": "text/plain" });
-              res.end("Erro ao processar resposta");
-            }
+        if (contentType.includes("text/html")) {
+          let html = buffer.toString("utf8");
+          html = html.replace(
+            "</head>",
+            `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
+          );
+          res.writeHead(proxyRes.statusCode, {
+            ...proxyRes.headers,
+            "Access-Control-Allow-Origin": "*",
           });
+          res.end(html);
+        } else {
+          res.writeHead(proxyRes.statusCode, {
+            ...proxyRes.headers,
+            "Access-Control-Allow-Origin": "*",
+          });
+          res.end(buffer);
         }
-      : (proxyRes) => {
-          proxyRes.headers["Access-Control-Allow-Origin"] = "*";
-        },
+      });
+    },
 
     onError(err, req, res) {
       console.error("❌ ProxyError", err.message);
