@@ -1,10 +1,3 @@
-/**
- * 🌎 Proxy Reverso - Catálogo Virtual (versão definitiva)
- * ✅ Mantém domínio personalizado
- * ✅ Reescreve /s/slug no HTML
- * ✅ Corrige assets e mantém SPA funcional
- */
-
 import express from "express";
 import { createProxyMiddleware, responseInterceptor } from "http-proxy-middleware";
 import fetch from "node-fetch";
@@ -12,7 +5,7 @@ import fetch from "node-fetch";
 const app = express();
 
 /* ======================================================
-   CONFIGURAÇÕES
+   CONFIG PRINCIPAL
 ====================================================== */
 const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
@@ -26,16 +19,16 @@ const CONFIG = {
 /* ======================================================
    CACHE LOCAL
 ====================================================== */
-const domainCache = new Map();
-const setCache = (h, d) => domainCache.set(h, { data: d, exp: Date.now() + CONFIG.CACHE_TTL });
+const cache = new Map();
+const setCache = (h, d) => cache.set(h, { data: d, exp: Date.now() + CONFIG.CACHE_TTL });
 const getCache = (h) => {
-  const c = domainCache.get(h);
+  const c = cache.get(h);
   if (!c || Date.now() > c.exp) return null;
   return c.data;
 };
 
 /* ======================================================
-   BUSCA NO SUPABASE
+   CONSULTA AO SUPABASE
 ====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
@@ -73,6 +66,13 @@ async function getDomainData(host) {
 }
 
 /* ======================================================
+   FUNÇÃO PARA DETECTAR ASSETS (não interceptar)
+====================================================== */
+function isAssetRequest(path) {
+  return /\.(js|css|png|jpg|jpeg|gif|svg|ico|webp|json|woff2?)$/i.test(path);
+}
+
+/* ======================================================
    PROXY PRINCIPAL
 ====================================================== */
 app.use(async (req, res, next) => {
@@ -88,27 +88,42 @@ app.use(async (req, res, next) => {
   }
 
   const slug = domainData.slug;
-  console.log(`➡️ Proxy: ${cleanHost}${path} → ${CONFIG.ORIGIN}/s/${slug}`);
+  const isAsset = isAssetRequest(path);
+  const target = CONFIG.ORIGIN;
 
-  // Intercepta respostas HTML e reescreve caminhos
+  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}/s/${slug}`);
+
   return createProxyMiddleware({
-    target: CONFIG.ORIGIN,
+    target,
     changeOrigin: true,
-    selfHandleResponse: true, // necessário para interceptar HTML
-    onProxyRes: responseInterceptor(async (buffer, proxyRes, req, res) => {
-      const contentType = proxyRes.headers["content-type"];
-      if (contentType && contentType.includes("text/html")) {
-        let html = buffer.toString("utf8");
-        // Reescreve rotas internas e assets
-        html = html
-          .replaceAll(`/s/${slug}/assets/`, `/assets/`)
-          .replaceAll(`href="/s/${slug}`, `href="/"`)
-          .replaceAll(`src="/s/${slug}`, `src="/"`);
-        return html;
-      }
-      return buffer;
-    }),
+    selfHandleResponse: !isAsset, // só intercepta HTML
+    onProxyRes: !isAsset
+      ? responseInterceptor(async (buffer, proxyRes, req, res) => {
+          const contentType = proxyRes.headers["content-type"];
+          if (contentType && contentType.includes("text/html")) {
+            let html = buffer.toString("utf8");
+
+            // Corrige caminhos absolutos e injeta meta
+            html = html
+              .replaceAll(`/s/${slug}/assets/`, `/assets/`)
+              .replaceAll(`href="/s/${slug}`, `href="/"`)
+              .replaceAll(`src="/s/${slug}`, `src="/"`)
+              .replace(
+                "<head>",
+                `<head>
+                   <base href="/" />
+                   <meta name="store-slug" content="${slug}" />
+                   <script>window.STORE_SLUG="${slug}";</script>`
+              );
+
+            return html;
+          }
+          return buffer;
+        })
+      : undefined,
     pathRewrite: (path) => {
+      // Reescreve para buscar conteúdo da loja correta
+      if (isAsset) return path.replace(/^\/assets\//, `/s/${slug}/assets/`);
       if (path === "/" || path === "") return `/s/${slug}`;
       return path.startsWith(`/s/${slug}`) ? path : `/s/${slug}${path}`;
     },
@@ -120,7 +135,7 @@ app.use(async (req, res, next) => {
 });
 
 /* ======================================================
-   START
+   INICIA SERVIDOR
 ====================================================== */
 app.listen(CONFIG.PORT, "0.0.0.0", () => {
   console.log(`🚀 Proxy reverso ativo na porta ${CONFIG.PORT}`);
