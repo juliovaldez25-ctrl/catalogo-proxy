@@ -14,7 +14,7 @@ const CONFIG = {
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
   EDGE_FUNCTION: "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/get-domain",
   ORIGIN: "https://catalogovirtual.app.br",
-  CACHE_TTL: 1000 * 60 * 10,
+  CACHE_TTL: 1000 * 60 * 10, // 10 minutos
   TIMEOUT: 7000,
   PORT: process.env.PORT || 8080,
 };
@@ -120,21 +120,18 @@ app.use(async (req, res, next) => {
     `);
   }
 
-  // ⚡ Redirecionamento completo para evitar CORS
-  let target = CONFIG.ORIGIN;
-  let rewritePath = path;
-
-  // Se for loja, injeta slug no HTML
+  // ⚡ Reescreve rotas (assets, API e HTML)
+  const target = CONFIG.ORIGIN;
   const injectSlug = !isStatic(path) && !path.startsWith("/~");
 
-  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}${rewritePath}`);
+  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}${path}`);
 
   return createProxyMiddleware({
     target,
     changeOrigin: true,
     secure: true,
     xfwd: true,
-    selfHandleResponse: injectSlug, // só intercepta se for HTML
+    selfHandleResponse: injectSlug,
     pathRewrite: (p) =>
       isStatic(p) || p.startsWith("/~") ? p : `/s/${domainData.slug}${p}`,
 
@@ -157,10 +154,14 @@ app.use(async (req, res, next) => {
 
               if (contentType.includes("text/html")) {
                 let html = buffer.toString("utf8");
-                html = html.replace(
-                  "</head>",
-                  `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
-                );
+
+                // 🧩 Corrige URLs absolutas → relativas (para evitar CORS)
+                html = html
+                  .replace(/https:\/\/catalogovirtual\.app\.br\/assets\//g, "/assets/")
+                  .replace(/https:\/\/catalogovirtual\.app\.br\/~flock\.js/g, "/~flock.js")
+                  .replace(/https:\/\/catalogovirtual\.app\.br\/~api\//g, "/~api/")
+                  .replace("</head>", `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`);
+
                 res.writeHead(proxyRes.statusCode, {
                   ...proxyRes.headers,
                   "Access-Control-Allow-Origin": "*",
