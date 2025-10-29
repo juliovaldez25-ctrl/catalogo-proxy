@@ -14,7 +14,7 @@ const CONFIG = {
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
   EDGE_FUNCTION: "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/get-domain",
   ORIGIN: "https://catalogovirtual.app.br",
-  CACHE_TTL: 1000 * 60 * 10, // 10 minutos
+  CACHE_TTL: 1000 * 60 * 10,
   TIMEOUT: 7000,
   PORT: process.env.PORT || 8080,
 };
@@ -65,11 +65,9 @@ async function getDomainData(host) {
   const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
 
   try {
-    // 1️⃣ Tenta a Edge Function
+    // 1️⃣ Tenta Edge Function
     const edge = await fetch(`${CONFIG.EDGE_FUNCTION}?domain=${host}`, {
-      headers: {
-        Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
-      },
+      headers: { Authorization: `Bearer ${CONFIG.SUPABASE_KEY}` },
       signal: controller.signal,
     });
 
@@ -80,11 +78,9 @@ async function getDomainData(host) {
         clearTimeout(timeout);
         return json;
       }
-    } else {
-      console.warn(`⚠️ Edge Function falhou: ${edge.status}`);
     }
 
-    // 2️⃣ Fallback direto no Supabase REST
+    // 2️⃣ Fallback REST Supabase
     const res = await fetch(
       `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
       {
@@ -95,12 +91,7 @@ async function getDomainData(host) {
         signal: controller.signal,
       }
     );
-
     clearTimeout(timeout);
-    if (!res.ok) {
-      console.error(`❌ [Supabase ${res.status}] ${await res.text()}`);
-      return null;
-    }
 
     const data = await res.json();
     const row = data?.[0];
@@ -109,9 +100,8 @@ async function getDomainData(host) {
       return row;
     }
   } catch (err) {
-    console.error(`⚠️ Erro Supabase: ${err.name} | ${err.message}`);
+    console.error(`⚠️ Erro Supabase: ${err.message}`);
   }
-
   return null;
 }
 
@@ -130,7 +120,7 @@ const STATIC_PATHS = [
 const isStatic = (path) => STATIC_PATHS.some((rx) => rx.test(path));
 
 /* ======================================================
-   🧭 MIDDLEWARE PRINCIPAL (PROXY)
+   🧭 MIDDLEWARE PRINCIPAL (PROXY SPA)
 ====================================================== */
 app.use(async (req, res, next) => {
   const originalHost = req.headers.host?.trim().toLowerCase() || "";
@@ -139,15 +129,11 @@ app.use(async (req, res, next) => {
 
   console.log(`🌐 ${cleanHost} → ${path}`);
 
-  // Página de status
   if (!cleanHost || cleanHost.includes("railway.app")) {
-    return res
-      .status(200)
-      .send("✅ Proxy ativo e aguardando conexões Cloudflare");
+    return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
 
   const domainData = await getDomainData(cleanHost);
-
   if (!domainData) {
     return res.status(404).send(`
       <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
@@ -157,17 +143,13 @@ app.use(async (req, res, next) => {
     `);
   }
 
-  /* ======================================================
-     🔁 REGRAS DE REESCRITA
-  ======================================================= */
-  let target = CONFIG.ORIGIN;
+  // 🔁 Caminho de destino
   let rewrittenPath = path;
-
-  // Se for uma rota React (ex: /cart, /checkout, etc)
   if (!isStatic(path) && !path.startsWith("/s/") && !path.startsWith("/~")) {
     rewrittenPath = `/s/${domainData.slug}${path}`;
   }
 
+  const target = CONFIG.ORIGIN;
   console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}${rewrittenPath}`);
 
   return createProxyMiddleware({
@@ -176,40 +158,47 @@ app.use(async (req, res, next) => {
     secure: true,
     xfwd: true,
     pathRewrite: () => rewrittenPath,
+    selfHandleResponse: true,
 
     onProxyRes(proxyRes, req, res) {
-      const enc = proxyRes.headers["content-encoding"];
       const chunks = [];
-
       proxyRes.on("data", (chunk) => chunks.push(chunk));
       proxyRes.on("end", () => {
-        let buffer = Buffer.concat(chunks);
+        const buffer = Buffer.concat(chunks);
         const contentType = proxyRes.headers["content-type"] || "";
 
-        delete proxyRes.headers["content-encoding"];
-        delete proxyRes.headers["content-length"];
+        // Se não for HTML, retorna direto
+        if (!contentType.includes("text/html")) {
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          return res.end(buffer);
+        }
 
-        if (enc === "gzip") buffer = zlib.gunzipSync(buffer);
-        else if (enc === "br") buffer = zlib.brotliDecompressSync(buffer);
+        // Tenta decodificar gzip ou br
+        let html;
+        try {
+          const enc = proxyRes.headers["content-encoding"];
+          let decoded = buffer;
+          if (enc === "gzip") decoded = zlib.gunzipSync(buffer);
+          else if (enc === "br") decoded = zlib.brotliDecompressSync(buffer);
+          html = decoded.toString("utf8");
+        } catch {
+          html = buffer.toString("utf8");
+        }
 
-        if (contentType.includes("text/html")) {
-          let html = buffer.toString("utf8");
+        // Injeção segura
+        if (html.includes("<div id=\"root\"></div>")) {
           html = html.replace(
             "</head>",
             `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
           );
-          res.writeHead(proxyRes.statusCode, {
-            ...proxyRes.headers,
-            "Access-Control-Allow-Origin": "*",
-          });
-          res.end(html);
-        } else {
-          res.writeHead(proxyRes.statusCode, {
-            ...proxyRes.headers,
-            "Access-Control-Allow-Origin": "*",
-          });
-          res.end(buffer);
         }
+
+        res.writeHead(proxyRes.statusCode, {
+          ...proxyRes.headers,
+          "Access-Control-Allow-Origin": "*",
+          "Content-Encoding": "identity",
+        });
+        res.end(html);
       });
     },
 
@@ -223,6 +212,6 @@ app.use(async (req, res, next) => {
 /* ======================================================
    🚀 INICIALIZA SERVIDOR
 ====================================================== */
-app.listen(CONFIG.PORT, "0.0.0.0", () => {
-  console.log(`🚀 Proxy reverso ativo na porta ${CONFIG.PORT}`);
-});
+app.listen(CONFIG.PORT, "0.0.0.0", () =>
+  console.log(`🚀 Proxy reverso ativo na porta ${CONFIG.PORT}`)
+);
