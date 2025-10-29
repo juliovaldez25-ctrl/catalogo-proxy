@@ -1,7 +1,6 @@
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import fetch from "node-fetch";
-import jwt from "jsonwebtoken";
 
 const app = express();
 
@@ -13,31 +12,20 @@ const CONFIG = {
   SUPABASE_KEY:
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
   ORIGIN: "https://catalogovirtual.app.br",
-  CACHE_TTL: 1000 * 60 * 10, // 10 min
-  TIMEOUT: 7000,
+  CACHE_TTL: 1000 * 60 * 10, // 10 minutos
+  TIMEOUT: 7000, // 7 segundos
   PORT: process.env.PORT || 8080,
 };
 
 /* ======================================================
-   🔐 JWT TEMPORÁRIO PARA SUPABASE
-====================================================== */
-function generateJWT() {
-  const payload = {
-    role: "service_role",
-    iss: "catalogo-proxy",
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 60 * 5,
-  };
-  return jwt.sign(payload, CONFIG.SUPABASE_KEY, { algorithm: "HS256" });
-}
-
-/* ======================================================
-   💾 CACHE DE DOMÍNIOS (com TTL)
+   🧠 CACHE DE DOMÍNIOS
 ====================================================== */
 const domainCache = new Map();
+
 function setCache(host, data) {
   domainCache.set(host, { data, expires: Date.now() + CONFIG.CACHE_TTL });
 }
+
 function getCache(host) {
   const cached = domainCache.get(host);
   if (!cached) return null;
@@ -57,7 +45,6 @@ async function getDomainData(host) {
   const cached = getCache(host);
   if (cached) return cached;
 
-  const token = generateJWT();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
 
@@ -67,13 +54,14 @@ async function getDomainData(host) {
       {
         headers: {
           apikey: CONFIG.SUPABASE_KEY,
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
         },
         signal: controller.signal,
       }
     );
 
     clearTimeout(timeout);
+
     if (!res.ok) {
       console.error(`❌ [Supabase ${res.status}] ${await res.text()}`);
       return null;
@@ -86,7 +74,7 @@ async function getDomainData(host) {
       return row;
     }
   } catch (err) {
-    console.error(`⚠️ Falha Supabase: ${err.name} | ${err.message}`);
+    console.error(`⚠️ Erro Supabase: ${err.name} | ${err.message}`);
   }
 
   return null;
@@ -109,7 +97,7 @@ app.use((req, res, next) => {
 });
 
 /* ======================================================
-   🚦 ROTAS ESTÁTICAS /assets
+   🚦 ROTAS ESTÁTICAS
 ====================================================== */
 const STATIC_PATHS = [
   /^\/assets\//,
@@ -132,7 +120,7 @@ app.use(async (req, res, next) => {
 
   console.log(`🌐 ${cleanHost} → ${path}`);
 
-  // Status
+  // Página de status
   if (!cleanHost || cleanHost.includes("railway.app")) {
     return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
@@ -140,7 +128,7 @@ app.use(async (req, res, next) => {
   const domainData = await getDomainData(cleanHost);
 
   if (!domainData) {
-    console.warn(`⚠️ Domínio não configurado: ${cleanHost}`);
+    console.warn(`⚠️ Domínio não configurado ou inativo: ${cleanHost}`);
     return res.status(404).send(`
       <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
       <h2>⚠️ Domínio não configurado</h2>
@@ -149,7 +137,7 @@ app.use(async (req, res, next) => {
     `);
   }
 
-  // ✅ Para arquivos estáticos, usar o ORIGIN direto (com CORS)
+  // Se for asset, proxy direto
   if (isStatic(path)) {
     const target = `${CONFIG.ORIGIN}${path}`;
     console.log(`📦 Asset → ${target}`);
@@ -162,7 +150,7 @@ app.use(async (req, res, next) => {
     })(req, res, next);
   }
 
-  // ✅ Para páginas, injetar slug no HTML
+  // Se for página, injeta STORE_SLUG
   const target = `${CONFIG.ORIGIN}/s/${domainData.slug}`;
   console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
 
@@ -182,10 +170,10 @@ app.use(async (req, res, next) => {
           if (key.toLowerCase() !== "content-length") res.setHeader(key, value);
         }
 
-        // 🧩 Se for HTML, injeta o STORE_SLUG
+        // 🧩 Injeta o slug automaticamente
         if (
           proxyRes.headers["content-type"]?.includes("text/html") &&
-          body.includes("<div id=\"root\"></div>")
+          body.includes('<div id="root"></div>')
         ) {
           body = body.replace(
             "</head>",
