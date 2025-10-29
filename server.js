@@ -66,9 +66,9 @@ async function getDomainData(host) {
 }
 
 /* ======================================================
-   FUNÇÃO PARA DETECTAR ASSETS (não interceptar)
+   DETECTA ASSETS
 ====================================================== */
-function isAssetRequest(path) {
+function isAsset(path) {
   return /\.(js|css|png|jpg|jpeg|gif|svg|ico|webp|json|woff2?)$/i.test(path);
 }
 
@@ -88,22 +88,21 @@ app.use(async (req, res, next) => {
   }
 
   const slug = domainData.slug;
-  const isAsset = isAssetRequest(path);
   const target = CONFIG.ORIGIN;
+  const asset = isAsset(path);
 
-  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}/s/${slug}`);
+  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}/s/${slug}${asset ? path : ""}`);
 
   return createProxyMiddleware({
     target,
     changeOrigin: true,
-    selfHandleResponse: !isAsset, // só intercepta HTML
-    onProxyRes: !isAsset
+    selfHandleResponse: !asset,
+    onProxyRes: !asset
       ? responseInterceptor(async (buffer, proxyRes, req, res) => {
           const contentType = proxyRes.headers["content-type"];
           if (contentType && contentType.includes("text/html")) {
             let html = buffer.toString("utf8");
-
-            // Corrige caminhos absolutos e injeta meta
+            // Corrige assets e injeta meta
             html = html
               .replaceAll(`/s/${slug}/assets/`, `/assets/`)
               .replaceAll(`href="/s/${slug}`, `href="/"`)
@@ -115,17 +114,16 @@ app.use(async (req, res, next) => {
                    <meta name="store-slug" content="${slug}" />
                    <script>window.STORE_SLUG="${slug}";</script>`
               );
-
             return html;
           }
           return buffer;
         })
       : undefined,
     pathRewrite: (path) => {
-      // Reescreve para buscar conteúdo da loja correta
-      if (isAsset) return path.replace(/^\/assets\//, `/s/${slug}/assets/`);
+      // ✅ Corrige caminhos dos assets
+      if (asset) return `/s/${slug}${path}`;
       if (path === "/" || path === "") return `/s/${slug}`;
-      return path.startsWith(`/s/${slug}`) ? path : `/s/${slug}${path}`;
+      return `/s/${slug}${path}`;
     },
     headers: {
       "X-Forwarded-Host": host,
