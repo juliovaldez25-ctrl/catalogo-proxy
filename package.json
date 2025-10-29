@@ -1,8 +1,8 @@
 {
   "name": "catalogo-proxy",
   "version": "1.0.0",
-  "type": "module",
   "main": "server.js",
+  "type": "module",
   "scripts": {
     "start": "node server.js"
   },
