@@ -1,23 +1,29 @@
 import express from "express";
-import { createProxyMiddleware, responseInterceptor } from "http-proxy-middleware";
+import { createProxyMiddleware } from "http-proxy-middleware";
 import fetch from "node-fetch";
-import zlib from "zlib";
 
 const app = express();
 
+/* ======================================================
+   🔧 CONFIGURAÇÕES PRINCIPAIS
+====================================================== */
 const CONFIG = {
-  EDGE_DOMAIN_API: "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/cors-allow",
+  EDGE_FUNCTION: "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/cors-allow",
   ORIGIN: "https://catalogovirtual.app.br",
-  CACHE_TTL: 1000 * 60 * 10, // 10 minutos
-  TIMEOUT: 7000,
+  CACHE_TTL: 1000 * 60 * 10, // 10 min
+  TIMEOUT: 8000, // 8s
   PORT: process.env.PORT || 8080,
 };
 
+/* ======================================================
+   🧠 CACHE LOCAL
+====================================================== */
 const domainCache = new Map();
 
 function setCache(host, data) {
   domainCache.set(host, { data, expires: Date.now() + CONFIG.CACHE_TTL });
 }
+
 function getCache(host) {
   const cached = domainCache.get(host);
   if (!cached) return null;
@@ -29,10 +35,11 @@ function getCache(host) {
 }
 
 /* ======================================================
-   🛰️ BUSCA DOMÍNIO VIA EDGE FUNCTION
+   🌐 FUNÇÃO: BUSCA DOMÍNIO VIA EDGE FUNCTION (Supabase)
 ====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
+
   const cached = getCache(host);
   if (cached) return cached;
 
@@ -40,33 +47,31 @@ async function getDomainData(host) {
   const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
 
   try {
-    const res = await fetch(`${CONFIG.EDGE_DOMAIN_API}?test=supabase&domain=${encodeURIComponent(host)}`, {
-      signal: controller.signal,
-    });
+    const url = `${CONFIG.EDGE_FUNCTION}?domain=${encodeURIComponent(host)}`;
+    const res = await fetch(url, { signal: controller.signal });
+
     clearTimeout(timeout);
-    if (!res.ok) return null;
+
+    if (!res.ok) {
+      console.error(`❌ Edge retornou ${res.status}: ${await res.text()}`);
+      return null;
+    }
+
     const data = await res.json();
-    const row = data?.sample || data;
-    if (row && row.slug) {
-      setCache(host, row);
-      return row;
+    if (data?.slug && ["active", "verified"].includes(data.status)) {
+      setCache(host, data);
+      return data;
     }
   } catch (err) {
-    console.error(`⚠️ Erro Edge Function: ${err.message}`);
+    console.error(`⚠️ Erro ao consultar Edge Function: ${err.message}`);
   }
+
   return null;
 }
 
 /* ======================================================
-   🌍 LIBERA CORS GLOBAL
+   🚦 ROTAS ESTÁTICAS
 ====================================================== */
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
-  next();
-});
-
 const STATIC_PATHS = [
   /^\/assets\//,
   /^\/favicon\.ico$/,
@@ -79,21 +84,24 @@ const STATIC_PATHS = [
 const isStatic = (path) => STATIC_PATHS.some((rx) => rx.test(path));
 
 /* ======================================================
-   🚀 MIDDLEWARE PRINCIPAL
+   🧭 MIDDLEWARE PRINCIPAL
 ====================================================== */
 app.use(async (req, res, next) => {
   const originalHost = req.headers.host?.trim().toLowerCase() || "";
   const cleanHost = originalHost.replace(/^www\./, "");
   const path = req.path;
 
-  console.log(`🌐 ${cleanHost} → ${path}`);
+  console.log(`🌐 Host: ${cleanHost} | ${path}`);
 
+  // Página de status
   if (!cleanHost || cleanHost.includes("railway.app")) {
     return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
 
   const domainData = await getDomainData(cleanHost);
+
   if (!domainData) {
+    console.warn(`⚠️ Domínio não encontrado: ${cleanHost}`);
     return res.status(404).send(`
       <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
       <h2>⚠️ Domínio não configurado</h2>
@@ -103,54 +111,29 @@ app.use(async (req, res, next) => {
   }
 
   const target = isStatic(path)
-    ? `${CONFIG.ORIGIN}${path}`
+    ? CONFIG.ORIGIN
     : `${CONFIG.ORIGIN}/s/${domainData.slug}`;
 
-  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
+  console.log(`➡️ Proxy → ${target}${path}`);
 
   return createProxyMiddleware({
     target,
     changeOrigin: true,
     secure: true,
+    xfwd: true,
     followRedirects: true,
-    selfHandleResponse: true, // ⚙️ intercepta resposta para tratar gzip e injetar slug
+    proxyTimeout: 10000,
 
-    onProxyRes: responseInterceptor(async (responseBuffer, proxyRes, req, res) => {
-      let body = responseBuffer;
-
-      // 🔧 Descompacta caso venha gzip ou br
-      const encoding = proxyRes.headers["content-encoding"];
-      if (encoding === "gzip") {
-        body = zlib.gunzipSync(body);
-        delete proxyRes.headers["content-encoding"];
-      } else if (encoding === "br") {
-        body = zlib.brotliDecompressSync(body);
-        delete proxyRes.headers["content-encoding"];
-      }
-
-      const contentType = proxyRes.headers["content-type"] || "";
-      const isHtml = contentType.includes("text/html");
-
-      if (isHtml) {
-        let html = body.toString("utf8");
-        if (html.includes('<div id="root"></div>')) {
-          html = html.replace(
-            "</head>",
-            `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
-          );
-        }
-        return html;
-      }
-
-      return body;
-    }),
+    onProxyRes(proxyRes, req, res) {
+      delete proxyRes.headers["content-encoding"]; // evita erro gzip
+    },
 
     onError(err, req, res) {
       console.error(`❌ ProxyError [${cleanHost}]`, err.message);
       res.status(502).send(`
         <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
-        <h2>❌ Erro temporário</h2>
-        <p>Não foi possível carregar a loja de <b>${cleanHost}</b>.</p>
+        <h2>❌ Erro 502 - Bad Gateway</h2>
+        <p>Falha ao conectar com a loja <b>${cleanHost}</b>.</p>
         <p>${err.message}</p>
         </body></html>
       `);
@@ -159,7 +142,7 @@ app.use(async (req, res, next) => {
 });
 
 /* ======================================================
-   🟢 INICIALIZA SERVIDOR
+   🚀 INICIALIZA SERVIDOR
 ====================================================== */
 app.listen(CONFIG.PORT, "0.0.0.0", () =>
   console.log(`🚀 Proxy reverso ativo na porta ${CONFIG.PORT}`)
