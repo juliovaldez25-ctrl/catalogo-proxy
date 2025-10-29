@@ -12,7 +12,7 @@ const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
   SUPABASE_KEY:
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
- EDGE_FUNCTION: "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/get-domain",
+  EDGE_FUNCTION: "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/get-domain",
   ORIGIN: "https://catalogovirtual.app.br",
   CACHE_TTL: 1000 * 60 * 10, // 10 minutos
   TIMEOUT: 7000,
@@ -24,14 +24,8 @@ const CONFIG = {
 ====================================================== */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET, POST, OPTIONS, PUT, DELETE"
-  );
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Requested-With"
-  );
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
+  res.setHeader("Access-Control-Allow-Headers", "*");
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
@@ -57,6 +51,7 @@ function getCache(host) {
 ====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
+
   const cached = getCache(host);
   if (cached) return cached;
 
@@ -64,11 +59,8 @@ async function getDomainData(host) {
   const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
 
   try {
-    // 🔹 Consulta a Edge Function
     const edge = await fetch(`${CONFIG.EDGE_FUNCTION}?domain=${host}`, {
-      headers: {
-        Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
-      },
+      headers: { Authorization: `Bearer ${CONFIG.SUPABASE_KEY}` },
       signal: controller.signal,
     });
 
@@ -115,9 +107,7 @@ app.use(async (req, res, next) => {
   console.log(`🌐 ${cleanHost} → ${path}`);
 
   if (!cleanHost || cleanHost.includes("railway.app")) {
-    return res
-      .status(200)
-      .send("✅ Proxy ativo e aguardando conexões Cloudflare");
+    return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
 
   const domainData = await getDomainData(cleanHost);
@@ -131,15 +121,10 @@ app.use(async (req, res, next) => {
     `);
   }
 
-  // 🔧 Proxy de todos os assets, evitando CORS
-  let target;
-  if (isStatic(path)) {
-    target = `${CONFIG.ORIGIN}${path}`;
-  } else if (path.startsWith("/~")) {
-    target = CONFIG.ORIGIN + path;
-  } else {
-    target = `${CONFIG.ORIGIN}/s/${domainData.slug}${path}`;
-  }
+  // 🔧 Sempre proxy completo (inclui assets, evita CORS)
+  const target = isStatic(path)
+    ? CONFIG.ORIGIN
+    : `${CONFIG.ORIGIN}/s/${domainData.slug}`;
 
   console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
 
@@ -148,56 +133,68 @@ app.use(async (req, res, next) => {
     changeOrigin: true,
     secure: true,
     xfwd: true,
+    followRedirects: true,
+    proxyTimeout: 10000,
     headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "*",
       "X-Forwarded-Host": originalHost,
       "X-Forwarded-Proto": "https",
       "User-Agent": req.headers["user-agent"] || "CatalogoProxy",
     },
 
+    // 🧩 CORS fix
+    onProxyRes(proxyRes) {
+      proxyRes.headers["Access-Control-Allow-Origin"] = "*";
+      proxyRes.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS";
+      proxyRes.headers["Access-Control-Allow-Headers"] = "*";
+    },
+
+    // 🔧 Injeção e descompressão
     onProxyRes(proxyRes, req, res) {
       const enc = proxyRes.headers["content-encoding"];
       const chunks = [];
 
       proxyRes.on("data", (chunk) => chunks.push(chunk));
       proxyRes.on("end", () => {
-        let buffer = Buffer.concat(chunks);
-        const contentType = proxyRes.headers["content-type"] || "";
+        try {
+          let buffer = Buffer.concat(chunks);
+          const contentType = proxyRes.headers["content-type"] || "";
 
-        delete proxyRes.headers["content-encoding"];
-        delete proxyRes.headers["content-length"];
+          delete proxyRes.headers["content-encoding"];
+          delete proxyRes.headers["content-length"];
 
-        if (enc === "gzip") buffer = zlib.gunzipSync(buffer);
-        else if (enc === "br") buffer = zlib.brotliDecompressSync(buffer);
+          if (enc === "gzip") buffer = zlib.gunzipSync(buffer);
+          else if (enc === "br") buffer = zlib.brotliDecompressSync(buffer);
 
-        if (contentType.includes("text/html")) {
-          let html = buffer.toString("utf8");
-          html = html.replace(
-            "</head>",
-            `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
-          );
-          res.writeHead(proxyRes.statusCode, {
-            ...proxyRes.headers,
-            "Access-Control-Allow-Origin": "*",
-          });
-          res.end(html);
-        } else {
-          res.writeHead(proxyRes.statusCode, {
-            ...proxyRes.headers,
-            "Access-Control-Allow-Origin": "*",
-          });
-          res.end(buffer);
+          // injeta slug só no HTML principal
+          if (contentType.includes("text/html") && !path.startsWith("/assets/")) {
+            let html = buffer.toString("utf8");
+            html = html.replace(
+              "</head>",
+              `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
+            );
+            res.writeHead(proxyRes.statusCode, {
+              ...proxyRes.headers,
+              "Access-Control-Allow-Origin": "*",
+            });
+            res.end(html);
+          } else {
+            res.writeHead(proxyRes.statusCode, {
+              ...proxyRes.headers,
+              "Access-Control-Allow-Origin": "*",
+            });
+            res.end(buffer);
+          }
+        } catch (e) {
+          console.error("⚠️ Falha ao processar resposta:", e.message);
+          res.writeHead(500, { "Content-Type": "text/plain" });
+          res.end("Erro ao processar resposta do proxy");
         }
       });
     },
 
     onError(err, req, res) {
       console.error("❌ ProxyError", err.message);
-      res
-        .status(502)
-        .send(`<h2>Erro 502</h2><p>${err.message}</p>`);
+      res.status(502).send(`<h2>Erro 502</h2><p>${err.message}</p>`);
     },
   })(req, res, next);
 });
