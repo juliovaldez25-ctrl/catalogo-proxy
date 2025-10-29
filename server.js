@@ -1,7 +1,6 @@
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import fetch from "node-fetch";
-import zlib from "zlib"; // <-- Adicione isto
 
 const app = express();
 
@@ -9,9 +8,7 @@ const app = express();
    🔧 CONFIGURAÇÕES PRINCIPAIS
 ====================================================== */
 const CONFIG = {
-  SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
-  SUPABASE_KEY:
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
+  EDGE_DOMAIN_API: "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/cors-allow",
   ORIGIN: "https://catalogovirtual.app.br",
   CACHE_TTL: 1000 * 60 * 10, // 10 minutos
   TIMEOUT: 7000, // 7 segundos
@@ -26,6 +23,7 @@ const domainCache = new Map();
 function setCache(host, data) {
   domainCache.set(host, { data, expires: Date.now() + CONFIG.CACHE_TTL });
 }
+
 function getCache(host) {
   const cached = domainCache.get(host);
   if (!cached) return null;
@@ -37,7 +35,7 @@ function getCache(host) {
 }
 
 /* ======================================================
-   🛰️ FUNÇÃO: BUSCA DOMÍNIO NO SUPABASE
+   🛰️ FUNÇÃO: BUSCA DOMÍNIO VIA EDGE FUNCTION
 ====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
@@ -50,31 +48,28 @@ async function getDomainData(host) {
 
   try {
     const res = await fetch(
-      `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
-      {
-        headers: {
-          apikey: CONFIG.SUPABASE_KEY,
-          Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
-        },
-        signal: controller.signal,
-      }
+      `${CONFIG.EDGE_DOMAIN_API}?test=supabase&domain=${encodeURIComponent(host)}`,
+      { signal: controller.signal }
     );
+
     clearTimeout(timeout);
 
     if (!res.ok) {
-      console.error(`❌ [Supabase ${res.status}] ${await res.text()}`);
+      console.error(`❌ Edge Function error ${res.status}`);
       return null;
     }
 
     const data = await res.json();
-    const row = data?.[0];
-    if (row && ["active", "verified"].includes(row.status)) {
+    const row = data?.sample || data;
+
+    if (row && row.slug) {
       setCache(host, row);
       return row;
     }
   } catch (err) {
-    console.error(`⚠️ Erro Supabase: ${err.name} | ${err.message}`);
+    console.error(`⚠️ Erro na Edge Function: ${err.name} | ${err.message}`);
   }
+
   return null;
 }
 
@@ -83,8 +78,14 @@ async function getDomainData(host) {
 ====================================================== */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, OPTIONS, PUT, DELETE"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Requested-With"
+  );
   next();
 });
 
@@ -112,11 +113,15 @@ app.use(async (req, res, next) => {
 
   console.log(`🌐 ${cleanHost} → ${path}`);
 
+  // Página de status
   if (!cleanHost || cleanHost.includes("railway.app")) {
-    return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
+    return res
+      .status(200)
+      .send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
 
   const domainData = await getDomainData(cleanHost);
+
   if (!domainData) {
     console.warn(`⚠️ Domínio não configurado ou inativo: ${cleanHost}`);
     return res.status(404).send(`
@@ -127,6 +132,7 @@ app.use(async (req, res, next) => {
     `);
   }
 
+  // Se for asset, proxy direto
   if (isStatic(path)) {
     const target = `${CONFIG.ORIGIN}${path}`;
     console.log(`📦 Asset → ${target}`);
@@ -139,6 +145,7 @@ app.use(async (req, res, next) => {
     })(req, res, next);
   }
 
+  // ✅ Proxy para páginas React (com injeção do slug e fix gzip)
   const target = `${CONFIG.ORIGIN}/s/${domainData.slug}`;
   console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
 
@@ -150,34 +157,33 @@ app.use(async (req, res, next) => {
     xfwd: true,
 
     onProxyRes: (proxyRes, req, res) => {
-      const chunks = [];
-      proxyRes.on("data", (chunk) => chunks.push(chunk));
+      const enc = proxyRes.headers["content-encoding"];
+      if (enc) delete proxyRes.headers["content-encoding"];
+
+      let body = Buffer.from([]);
+      proxyRes.on("data", (chunk) => (body = Buffer.concat([body, chunk])));
 
       proxyRes.on("end", () => {
-        const buffer = Buffer.concat(chunks);
-        const encoding = proxyRes.headers["content-encoding"];
         const contentType = proxyRes.headers["content-type"] || "";
         const isHtml = contentType.includes("text/html");
 
-        delete proxyRes.headers["content-encoding"];
-
-        // 🔧 Descompressão automática
-        let decoded = buffer;
-        if (encoding === "gzip") decoded = zlib.gunzipSync(buffer);
-        else if (encoding === "br") decoded = zlib.brotliDecompressSync(buffer);
+        res.status(proxyRes.statusCode);
+        for (const [key, value] of Object.entries(proxyRes.headers)) {
+          if (key.toLowerCase() !== "content-length")
+            res.setHeader(key, value);
+        }
 
         if (isHtml) {
-          let html = decoded.toString("utf8");
+          let html = body.toString("utf8");
           if (html.includes('<div id="root"></div>')) {
             html = html.replace(
               "</head>",
               `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
             );
           }
-          res.status(proxyRes.statusCode).send(html);
+          res.send(html);
         } else {
-          res.writeHead(proxyRes.statusCode, proxyRes.headers);
-          res.end(decoded);
+          res.end(body);
         }
       });
     },
