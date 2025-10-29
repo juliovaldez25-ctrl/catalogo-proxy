@@ -6,7 +6,7 @@ import zlib from "zlib";
 const app = express();
 
 /* ======================================================
-   ⚙️ CONFIGURAÇÕES PRINCIPAIS
+   ⚙️ CONFIGURAÇÕES
 ====================================================== */
 const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
@@ -20,67 +20,52 @@ const CONFIG = {
 };
 
 /* ======================================================
-   🌐 LIBERA CORS GLOBALMENTE
+   🌐 LIBERA CORS
 ====================================================== */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET, POST, OPTIONS, PUT, DELETE"
-  );
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Requested-With"
-  );
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
 
 /* ======================================================
-   🧠 CACHE DE DOMÍNIOS
+   🧠 CACHE
 ====================================================== */
-const domainCache = new Map();
+const cache = new Map();
 function setCache(host, data) {
-  domainCache.set(host, { data, expires: Date.now() + CONFIG.CACHE_TTL });
+  cache.set(host, { data, expires: Date.now() + CONFIG.CACHE_TTL });
 }
 function getCache(host) {
-  const cached = domainCache.get(host);
-  if (!cached || Date.now() > cached.expires) {
-    domainCache.delete(host);
+  const c = cache.get(host);
+  if (!c) return null;
+  if (Date.now() > c.expires) {
+    cache.delete(host);
     return null;
   }
-  return cached.data;
+  return c.data;
 }
 
 /* ======================================================
-   🛰️ FUNÇÃO: BUSCA DOMÍNIO NO SUPABASE (Edge → REST)
+   🛰️ BUSCA DOMÍNIO NO SUPABASE
 ====================================================== */
 async function getDomainData(host) {
-  if (!host) return null;
-
   const cached = getCache(host);
   if (cached) return cached;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
-
   try {
-    // 1️⃣ Tenta Edge Function
     const edge = await fetch(`${CONFIG.EDGE_FUNCTION}?domain=${host}`, {
       headers: { Authorization: `Bearer ${CONFIG.SUPABASE_KEY}` },
-      signal: controller.signal,
     });
-
     if (edge.ok) {
-      const json = await edge.json();
-      if (json?.slug) {
-        setCache(host, json);
-        clearTimeout(timeout);
-        return json;
+      const data = await edge.json();
+      if (data?.slug) {
+        setCache(host, data);
+        return data;
       }
     }
 
-    // 2️⃣ Fallback REST Supabase
     const res = await fetch(
       `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
       {
@@ -88,10 +73,8 @@ async function getDomainData(host) {
           apikey: CONFIG.SUPABASE_KEY,
           Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
         },
-        signal: controller.signal,
       }
     );
-    clearTimeout(timeout);
 
     const data = await res.json();
     const row = data?.[0];
@@ -100,7 +83,7 @@ async function getDomainData(host) {
       return row;
     }
   } catch (err) {
-    console.error(`⚠️ Erro Supabase: ${err.message}`);
+    console.error("⚠️ Supabase Error:", err.message);
   }
   return null;
 }
@@ -112,88 +95,83 @@ const STATIC_PATHS = [
   /^\/assets\//,
   /^\/favicon\.ico$/,
   /^\/robots\.txt$/,
-  /^\/sitemap\.xml$/,
   /^\/site\.webmanifest$/,
-  /^\/~flock\.js$/,
   /^\/~api\//,
 ];
-const isStatic = (path) => STATIC_PATHS.some((rx) => rx.test(path));
+const isStatic = (p) => STATIC_PATHS.some((rx) => rx.test(p));
 
 /* ======================================================
-   🧭 MIDDLEWARE PRINCIPAL (PROXY SPA)
+   🧭 MIDDLEWARE PRINCIPAL
 ====================================================== */
 app.use(async (req, res, next) => {
-  const originalHost = req.headers.host?.trim().toLowerCase() || "";
-  const cleanHost = originalHost.replace(/^www\./, "");
+  const host = req.headers.host?.toLowerCase().replace(/^www\./, "");
   const path = req.path;
 
-  console.log(`🌐 ${cleanHost} → ${path}`);
-
-  if (!cleanHost || cleanHost.includes("railway.app")) {
-    return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
+  if (!host || host.includes("railway.app")) {
+    return res.send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
 
-  const domainData = await getDomainData(cleanHost);
-  if (!domainData) {
-    return res.status(404).send(`
-      <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
-      <h2>⚠️ Domínio não configurado</h2>
-      <p>${cleanHost} ainda não foi ativado no Catálogo Virtual.</p>
-      </body></html>
-    `);
-  }
-
-  // 🔁 Caminho de destino
-  let rewrittenPath = path;
-  if (!isStatic(path) && !path.startsWith("/s/") && !path.startsWith("/~")) {
-    rewrittenPath = `/s/${domainData.slug}${path}`;
+  const domain = await getDomainData(host);
+  if (!domain) {
+    return res.status(404).send(`<h3>⚠️ Domínio não configurado: ${host}</h3>`);
   }
 
   const target = CONFIG.ORIGIN;
-  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}${rewrittenPath}`);
+  let rewrittenPath = path;
+  if (!isStatic(path) && !path.startsWith("/s/")) {
+    rewrittenPath = `/s/${domain.slug}${path}`;
+  }
 
-  return createProxyMiddleware({
+  console.log(`➡️ Proxy: ${host}${path} → ${target}${rewrittenPath}`);
+
+  const proxy = createProxyMiddleware({
     target,
     changeOrigin: true,
     secure: true,
     xfwd: true,
-    pathRewrite: () => rewrittenPath,
     selfHandleResponse: true,
+    pathRewrite: () => rewrittenPath,
 
-    onProxyRes(proxyRes, req, res) {
-      const chunks = [];
-      proxyRes.on("data", (chunk) => chunks.push(chunk));
-      proxyRes.on("end", () => {
-        const buffer = Buffer.concat(chunks);
+    async onProxyRes(proxyRes, req, res) {
+      let body = Buffer.from([]);
+
+      proxyRes.on("data", (chunk) => (body = Buffer.concat([body, chunk])));
+      proxyRes.on("end", async () => {
+        let buffer = body;
         const contentType = proxyRes.headers["content-type"] || "";
+        const enc = proxyRes.headers["content-encoding"];
 
-        // Se não for HTML, retorna direto
+        try {
+          if (enc === "gzip") buffer = zlib.gunzipSync(buffer);
+          else if (enc === "br") buffer = zlib.brotliDecompressSync(buffer);
+        } catch {}
+
+        // 🔄 Se não for HTML (JS, CSS etc.)
         if (!contentType.includes("text/html")) {
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           return res.end(buffer);
         }
 
-        // Tenta decodificar gzip ou br
-        let html;
-        try {
-          const enc = proxyRes.headers["content-encoding"];
-          let decoded = buffer;
-          if (enc === "gzip") decoded = zlib.gunzipSync(buffer);
-          else if (enc === "br") decoded = zlib.brotliDecompressSync(buffer);
-          html = decoded.toString("utf8");
-        } catch {
-          html = buffer.toString("utf8");
+        let html = buffer.toString("utf8");
+
+        // ⚠️ Caso o backend devolva 404 → busca index.html real
+        if (proxyRes.statusCode === 404 || !html.includes("<div id=\"root\"")) {
+          try {
+            const fallback = await fetch(`${CONFIG.ORIGIN}/s/${domain.slug}/index.html`);
+            html = await fallback.text();
+            console.log("🔁 Fallback index.html carregado");
+          } catch {
+            console.log("❌ Falha no fallback index.html");
+          }
         }
 
-        // Injeção segura
-        if (html.includes("<div id=\"root\"></div>")) {
-          html = html.replace(
-            "</head>",
-            `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
-          );
-        }
+        // 💉 Injeta o slug no HTML
+        html = html.replace(
+          "</head>",
+          `<script>window.STORE_SLUG="${domain.slug}";</script>\n</head>`
+        );
 
-        res.writeHead(proxyRes.statusCode, {
+        res.writeHead(200, {
           ...proxyRes.headers,
           "Access-Control-Allow-Origin": "*",
           "Content-Encoding": "identity",
@@ -201,17 +179,14 @@ app.use(async (req, res, next) => {
         res.end(html);
       });
     },
+  });
 
-    onError(err, req, res) {
-      console.error("❌ ProxyError", err.message);
-      res.status(502).send(`<h2>Erro 502</h2><p>${err.message}</p>`);
-    },
-  })(req, res, next);
+  proxy(req, res, next);
 });
 
 /* ======================================================
-   🚀 INICIALIZA SERVIDOR
+   🚀 INICIALIZA
 ====================================================== */
-app.listen(CONFIG.PORT, "0.0.0.0", () =>
-  console.log(`🚀 Proxy reverso ativo na porta ${CONFIG.PORT}`)
-);
+app.listen(CONFIG.PORT, "0.0.0.0", () => {
+  console.log(`🚀 Proxy reverso ativo na porta ${CONFIG.PORT}`);
+});
