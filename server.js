@@ -1,7 +1,7 @@
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import fetch from "node-fetch";
-import jwt from "jsonwebtoken";
+
 
 const app = express();
 
@@ -15,18 +15,7 @@ const CONFIG = {
  PORT: process.env.PORT || 8080, 
 };
 
-/* ======================================================
-   🔐 JWT TEMPORÁRIO (para autenticar no Supabase)
-====================================================== */
-function generateJWT() {
-  const payload = {
-    role: "service_role",
-    iss: "catalogo-proxy",
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 60 * 5, // 5 minutos
-  };
-  return jwt.sign(payload, CONFIG.SUPABASE_KEY, { algorithm: "HS256" });
-}
+
 
 /* ======================================================
    🧠 CACHE DE DOMÍNIOS (com TTL)
