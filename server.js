@@ -1,6 +1,7 @@
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import fetch from "node-fetch";
+import zlib from "zlib"; // <-- Adicione isto
 
 const app = express();
 
@@ -25,7 +26,6 @@ const domainCache = new Map();
 function setCache(host, data) {
   domainCache.set(host, { data, expires: Date.now() + CONFIG.CACHE_TTL });
 }
-
 function getCache(host) {
   const cached = domainCache.get(host);
   if (!cached) return null;
@@ -59,7 +59,6 @@ async function getDomainData(host) {
         signal: controller.signal,
       }
     );
-
     clearTimeout(timeout);
 
     if (!res.ok) {
@@ -76,7 +75,6 @@ async function getDomainData(host) {
   } catch (err) {
     console.error(`⚠️ Erro Supabase: ${err.name} | ${err.message}`);
   }
-
   return null;
 }
 
@@ -85,14 +83,8 @@ async function getDomainData(host) {
 ====================================================== */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET, POST, OPTIONS, PUT, DELETE"
-  );
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Requested-With"
-  );
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
   next();
 });
 
@@ -120,15 +112,11 @@ app.use(async (req, res, next) => {
 
   console.log(`🌐 ${cleanHost} → ${path}`);
 
-  // Página de status
   if (!cleanHost || cleanHost.includes("railway.app")) {
-    return res
-      .status(200)
-      .send("✅ Proxy ativo e aguardando conexões Cloudflare");
+    return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
 
   const domainData = await getDomainData(cleanHost);
-
   if (!domainData) {
     console.warn(`⚠️ Domínio não configurado ou inativo: ${cleanHost}`);
     return res.status(404).send(`
@@ -139,7 +127,6 @@ app.use(async (req, res, next) => {
     `);
   }
 
-  // Se for asset, proxy direto
   if (isStatic(path)) {
     const target = `${CONFIG.ORIGIN}${path}`;
     console.log(`📦 Asset → ${target}`);
@@ -152,7 +139,6 @@ app.use(async (req, res, next) => {
     })(req, res, next);
   }
 
-  // ✅ Proxy para páginas React (com injeção do slug e fix gzip)
   const target = `${CONFIG.ORIGIN}/s/${domainData.slug}`;
   console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
 
@@ -164,36 +150,34 @@ app.use(async (req, res, next) => {
     xfwd: true,
 
     onProxyRes: (proxyRes, req, res) => {
-      // 🔧 Remove o content-encoding para evitar erro gzip
-      const enc = proxyRes.headers["content-encoding"];
-      if (enc) delete proxyRes.headers["content-encoding"];
-
-      let body = Buffer.from([]);
-      proxyRes.on("data", (chunk) => {
-        body = Buffer.concat([body, chunk]);
-      });
+      const chunks = [];
+      proxyRes.on("data", (chunk) => chunks.push(chunk));
 
       proxyRes.on("end", () => {
+        const buffer = Buffer.concat(chunks);
+        const encoding = proxyRes.headers["content-encoding"];
         const contentType = proxyRes.headers["content-type"] || "";
         const isHtml = contentType.includes("text/html");
 
-        res.status(proxyRes.statusCode);
-        for (const [key, value] of Object.entries(proxyRes.headers)) {
-          if (key.toLowerCase() !== "content-length")
-            res.setHeader(key, value);
-        }
+        delete proxyRes.headers["content-encoding"];
+
+        // 🔧 Descompressão automática
+        let decoded = buffer;
+        if (encoding === "gzip") decoded = zlib.gunzipSync(buffer);
+        else if (encoding === "br") decoded = zlib.brotliDecompressSync(buffer);
 
         if (isHtml) {
-          let html = body.toString("utf8");
+          let html = decoded.toString("utf8");
           if (html.includes('<div id="root"></div>')) {
             html = html.replace(
               "</head>",
               `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
             );
           }
-          res.send(html);
+          res.status(proxyRes.statusCode).send(html);
         } else {
-          res.end(body);
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          res.end(decoded);
         }
       });
     },
