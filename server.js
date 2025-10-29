@@ -15,12 +15,12 @@ const CONFIG = {
   EDGE_FUNCTION: "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/cors-allow",
   ORIGIN: "https://catalogovirtual.app.br",
   CACHE_TTL: 1000 * 60 * 10, // 10 minutos
-  TIMEOUT: 7000, // 7 segundos
+  TIMEOUT: 7000,
   PORT: process.env.PORT || 8080,
 };
 
 /* ======================================================
-   🌐 CORS LIBERADO GLOBALMENTE
+   🌐 LIBERA CORS GLOBALMENTE
 ====================================================== */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -37,7 +37,7 @@ app.use((req, res, next) => {
 });
 
 /* ======================================================
-   🧠 CACHE DE DOMÍNIOS (com TTL)
+   🧠 CACHE DE DOMÍNIOS
 ====================================================== */
 const domainCache = new Map();
 function setCache(host, data) {
@@ -53,18 +53,26 @@ function getCache(host) {
 }
 
 /* ======================================================
-   🛰️ FUNÇÃO: BUSCA DOMÍNIO NO SUPABASE
+   🛰️ FUNÇÃO: BUSCA DOMÍNIO NO SUPABASE VIA EDGE
 ====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
   const cached = getCache(host);
   if (cached) return cached;
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
+
   try {
-    // 1️⃣ Tenta Edge Function
+    // 🔹 Consulta a Edge Function
     const edge = await fetch(`${CONFIG.EDGE_FUNCTION}?domain=${host}`, {
-      headers: { Authorization: `Bearer ${CONFIG.SUPABASE_KEY}` },
+      headers: {
+        Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
+      },
+      signal: controller.signal,
     });
+
+    clearTimeout(timeout);
 
     if (edge.ok) {
       const json = await edge.json();
@@ -75,31 +83,8 @@ async function getDomainData(host) {
     } else {
       console.warn(`⚠️ Edge Function falhou: ${edge.status}`);
     }
-
-    // 2️⃣ Fallback: REST Supabase
-    const res = await fetch(
-      `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
-      {
-        headers: {
-          apikey: CONFIG.SUPABASE_KEY,
-          Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
-        },
-      }
-    );
-
-    if (!res.ok) {
-      console.error(`❌ Supabase ${res.status}: ${await res.text()}`);
-      return null;
-    }
-
-    const data = await res.json();
-    const row = data?.[0];
-    if (row && ["active", "verified"].includes(row.status)) {
-      setCache(host, row);
-      return row;
-    }
   } catch (err) {
-    console.error(`⚠️ Erro Supabase: ${err.name} | ${err.message}`);
+    console.error(`⚠️ Erro ao buscar domínio via Edge: ${err.message}`);
   }
 
   return null;
@@ -129,12 +114,14 @@ app.use(async (req, res, next) => {
 
   console.log(`🌐 ${cleanHost} → ${path}`);
 
-  // Página de status
   if (!cleanHost || cleanHost.includes("railway.app")) {
-    return res.status(200).send("✅ Proxy ativo e aguardando conexões Cloudflare");
+    return res
+      .status(200)
+      .send("✅ Proxy ativo e aguardando conexões Cloudflare");
   }
 
   const domainData = await getDomainData(cleanHost);
+
   if (!domainData) {
     return res.status(404).send(`
       <html><body style="font-family:sans-serif;text-align:center;margin-top:40px">
@@ -144,9 +131,15 @@ app.use(async (req, res, next) => {
     `);
   }
 
-  const target = isStatic(path)
-    ? CONFIG.ORIGIN
-    : `${CONFIG.ORIGIN}/s/${domainData.slug}`;
+  // 🔧 Proxy de todos os assets, evitando CORS
+  let target;
+  if (isStatic(path)) {
+    target = `${CONFIG.ORIGIN}${path}`;
+  } else if (path.startsWith("/~")) {
+    target = CONFIG.ORIGIN + path;
+  } else {
+    target = `${CONFIG.ORIGIN}/s/${domainData.slug}${path}`;
+  }
 
   console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
 
@@ -155,6 +148,14 @@ app.use(async (req, res, next) => {
     changeOrigin: true,
     secure: true,
     xfwd: true,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "*",
+      "X-Forwarded-Host": originalHost,
+      "X-Forwarded-Proto": "https",
+      "User-Agent": req.headers["user-agent"] || "CatalogoProxy",
+    },
 
     onProxyRes(proxyRes, req, res) {
       const enc = proxyRes.headers["content-encoding"];
@@ -173,22 +174,20 @@ app.use(async (req, res, next) => {
 
         if (contentType.includes("text/html")) {
           let html = buffer.toString("utf8");
-
-          // ✅ Injeta STORE_SLUG logo no início do <head>
           html = html.replace(
-            "<head>",
-            `<head>\n<script>window.STORE_SLUG="${domainData.slug}";</script>`
+            "</head>",
+            `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
           );
-
-          // 🔧 Reescreve caminhos relativos → absolutos
-          html = html
-            .replace(/src="\/assets\//g, 'src="https://catalogovirtual.app.br/assets/')
-            .replace(/href="\/assets\//g, 'href="https://catalogovirtual.app.br/assets/');
-
-          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          res.writeHead(proxyRes.statusCode, {
+            ...proxyRes.headers,
+            "Access-Control-Allow-Origin": "*",
+          });
           res.end(html);
         } else {
-          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          res.writeHead(proxyRes.statusCode, {
+            ...proxyRes.headers,
+            "Access-Control-Allow-Origin": "*",
+          });
           res.end(buffer);
         }
       });
@@ -196,7 +195,9 @@ app.use(async (req, res, next) => {
 
     onError(err, req, res) {
       console.error("❌ ProxyError", err.message);
-      res.status(502).send(`<h2>Erro 502</h2><p>${err.message}</p>`);
+      res
+        .status(502)
+        .send(`<h2>Erro 502</h2><p>${err.message}</p>`);
     },
   })(req, res, next);
 });
