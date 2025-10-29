@@ -1,10 +1,17 @@
+/**
+ * 🔥 Proxy Reverso - Catálogo Virtual (versão simplificada)
+ * ✅ Sem JWT, com cache, logs e tratamento de erros refinados
+ */
+
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import fetch from "node-fetch";
-import jwt from "jsonwebtoken";
 
 const app = express();
 
+/* ======================================================
+   🔧 CONFIGURAÇÕES PRINCIPAIS
+====================================================== */
 const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
   SUPABASE_KEY:
@@ -12,21 +19,8 @@ const CONFIG = {
   ORIGIN: "https://catalogovirtual.app.br",
   CACHE_TTL: 1000 * 60 * 10, // 10 minutos
   TIMEOUT: 7000, // 7 segundos
- PORT: process.env.PORT || 8080, 
+  PORT: process.env.PORT || 8080,
 };
-
-/* ======================================================
-   🔐 JWT TEMPORÁRIO (para autenticar no Supabase)
-====================================================== */
-function generateJWT() {
-  const payload = {
-    role: "service_role",
-    iss: "catalogo-proxy",
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 60 * 5, // 5 minutos
-  };
-  return jwt.sign(payload, CONFIG.SUPABASE_KEY, { algorithm: "HS256" });
-}
 
 /* ======================================================
    🧠 CACHE DE DOMÍNIOS (com TTL)
@@ -56,7 +50,6 @@ async function getDomainData(host) {
   const cached = getCache(host);
   if (cached) return cached;
 
-  const token = generateJWT();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
 
@@ -66,7 +59,7 @@ async function getDomainData(host) {
       {
         headers: {
           apikey: CONFIG.SUPABASE_KEY,
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
         },
         signal: controller.signal,
       }
@@ -116,7 +109,7 @@ app.use(async (req, res, next) => {
 
   console.log(`🌐 Requisição recebida: ${cleanHost} | Caminho: ${path}`);
 
-  // Página de status
+  // Página de status (verificação)
   if (!cleanHost || cleanHost.includes("railway.app")) {
     return res
       .status(200)
