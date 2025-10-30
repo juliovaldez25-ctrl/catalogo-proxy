@@ -12,10 +12,11 @@ const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
   SUPABASE_KEY:
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
-  EDGE_FUNCTION: "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/get-domain",
+  EDGE_FUNCTION:
+    "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/get-domain",
   ORIGIN: "https://catalogovirtual.app.br",
   CACHE_TTL: 1000 * 60 * 10, // 10 minutos
-  TIMEOUT: 7000, // 7 segundos
+  TIMEOUT: 7000,
   PORT: process.env.PORT || 8080,
 };
 
@@ -51,7 +52,6 @@ function getCache(host) {
 ====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
-
   const cached = getCache(host);
   if (cached) return cached;
 
@@ -59,11 +59,8 @@ async function getDomainData(host) {
   const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
 
   try {
-    // 🔹 Tenta a Edge Function
     const edge = await fetch(`${CONFIG.EDGE_FUNCTION}?domain=${host}`, {
-      headers: {
-        Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
-      },
+      headers: { Authorization: `Bearer ${CONFIG.SUPABASE_KEY}` },
       signal: controller.signal,
     });
 
@@ -73,11 +70,9 @@ async function getDomainData(host) {
         setCache(host, json);
         return json;
       }
-    } else {
-      console.warn(`⚠️ Edge Function falhou: ${edge.status}`);
     }
 
-    // 🔹 Fallback direto no Supabase REST
+    // fallback direto no Supabase REST
     const res = await fetch(
       `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
       {
@@ -88,21 +83,18 @@ async function getDomainData(host) {
         signal: controller.signal,
       }
     );
-
     clearTimeout(timeout);
-    if (!res.ok) {
-      console.error(`❌ [Supabase ${res.status}] ${await res.text()}`);
-      return null;
-    }
 
-    const data = await res.json();
-    const row = data?.[0];
-    if (row && ["active", "verified"].includes(row.status)) {
-      setCache(host, row);
-      return row;
+    if (res.ok) {
+      const data = await res.json();
+      const row = data?.[0];
+      if (row && ["active", "verified"].includes(row.status)) {
+        setCache(host, row);
+        return row;
+      }
     }
   } catch (err) {
-    console.error(`⚠️ Erro Supabase: ${err.name} | ${err.message}`);
+    console.error("⚠️ Erro Supabase:", err.message);
   }
 
   return null;
@@ -148,7 +140,6 @@ app.use(async (req, res, next) => {
 
   const target = CONFIG.ORIGIN;
   let rewrittenPath = path;
-
   if (!isStatic(path) && !path.startsWith("/s/")) {
     rewrittenPath = `/s/${domainData.slug}${path}`;
   }
@@ -163,52 +154,49 @@ app.use(async (req, res, next) => {
     selfHandleResponse: true,
     pathRewrite: () => rewrittenPath,
 
+    /* ======================================================
+       🧩 TRATAMENTO DE RESPOSTA
+    ======================================================= */
     onProxyRes(proxyRes, req, res) {
       const chunks = [];
       proxyRes.on("data", (chunk) => chunks.push(chunk));
       proxyRes.on("end", async () => {
-        const buffer = Buffer.concat(chunks);
+        let buffer = Buffer.concat(chunks);
         const contentType = proxyRes.headers["content-type"] || "";
 
-        // ✅ 1. Se não for HTML, devolve o conteúdo como veio (sem decodificar)
+        // ✅ 1. Se não for HTML, devolve direto
         if (!contentType.includes("text/html")) {
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           return res.end(buffer);
         }
 
-        // ✅ 2. Decodifica apenas HTML
-        let html;
+        // ✅ 2. Decodifica HTML (gzip/br)
         try {
           const enc = proxyRes.headers["content-encoding"];
-          let decoded = buffer;
-          if (enc === "gzip") decoded = zlib.gunzipSync(buffer);
-          else if (enc === "br") decoded = zlib.brotliDecompressSync(buffer);
-          html = decoded.toString("utf8");
-        } catch {
-          html = buffer.toString("utf8");
-        }
+          if (enc === "gzip") buffer = zlib.gunzipSync(buffer);
+          else if (enc === "br") buffer = zlib.brotliDecompressSync(buffer);
+        } catch {}
 
-        // ✅ 3. Fallback se o HTML for inválido ou 404
+        let html = buffer.toString("utf8");
+
+        // ✅ 3. SPA Fallback: se 404 ou sem root, busca index.html
         if (proxyRes.statusCode === 404 || !html.includes("<div id=\"root\"")) {
           try {
             const fallback = await fetch(`${CONFIG.ORIGIN}/s/${domainData.slug}/index.html`);
             html = await fallback.text();
-            console.log("🔁 Fallback index.html carregado");
-          } catch {
-            console.log("❌ Falha no fallback index.html");
+            console.log("🔁 SPA fallback ativado:", req.path);
+          } catch (e) {
+            console.error("❌ Falha ao carregar fallback index.html:", e.message);
           }
         }
 
-        // ✅ 4. Injeta o slug e corrige URLs absolutas
-        html = html.replace(
-          "</head>",
-          `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`
-        );
+        // ✅ 4. Injeta slug e ajusta URLs
         html = html
+          .replace("</head>", `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`)
           .replaceAll("https://catalogovirtual.app.br/assets/", "/assets/")
           .replaceAll("https://catalogovirtual.app.br/~flock.js", "/~flock.js");
 
-        // ✅ 5. Remove headers de compressão antes de enviar
+        // ✅ 5. Remove compressão duplicada
         const headers = { ...proxyRes.headers };
         delete headers["content-encoding"];
         delete headers["content-length"];
