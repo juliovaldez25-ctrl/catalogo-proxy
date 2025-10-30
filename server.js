@@ -140,9 +140,9 @@ app.use(async (req, res, next) => {
 
   const target = CONFIG.ORIGIN;
   let rewrittenPath = path;
-  if (!isStatic(path) && !path.startsWith("/s/")) {
-    rewrittenPath = `/s/${domainData.slug}${path}`;
-  }
+ 
+rewrittenPath = `/s/${domainData.slug}${path}`;
+
 
   console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}${rewrittenPath}`);
 
