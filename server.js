@@ -6,7 +6,7 @@ import zlib from "zlib";
 const app = express();
 
 /* ======================================================
-   ⚙️ CONFIGURAÇÕES
+   ⚙️ CONFIG
 ====================================================== */
 const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
@@ -20,7 +20,7 @@ const CONFIG = {
 };
 
 /* ======================================================
-   🌐 LIBERA CORS
+   🌐 CORS
 ====================================================== */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -31,7 +31,7 @@ app.use((req, res, next) => {
 });
 
 /* ======================================================
-   🧠 CACHE
+   🧠 CACHE DE DOMÍNIOS
 ====================================================== */
 const cache = new Map();
 function setCache(host, data) {
@@ -75,7 +75,6 @@ async function getDomainData(host) {
         },
       }
     );
-
     const data = await res.json();
     const row = data?.[0];
     if (row && ["active", "verified"].includes(row.status)) {
@@ -146,7 +145,7 @@ app.use(async (req, res, next) => {
           else if (enc === "br") buffer = zlib.brotliDecompressSync(buffer);
         } catch {}
 
-        // 🔄 Se não for HTML (JS, CSS etc.)
+        // 🔄 Se não for HTML, retorna direto
         if (!contentType.includes("text/html")) {
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           return res.end(buffer);
@@ -154,7 +153,7 @@ app.use(async (req, res, next) => {
 
         let html = buffer.toString("utf8");
 
-        // ⚠️ Caso o backend devolva 404 → busca index.html real
+        // 🔁 Fallback em caso de 404
         if (proxyRes.statusCode === 404 || !html.includes("<div id=\"root\"")) {
           try {
             const fallback = await fetch(`${CONFIG.ORIGIN}/s/${domain.slug}/index.html`);
@@ -165,10 +164,20 @@ app.use(async (req, res, next) => {
           }
         }
 
-        // 💉 Injeta o slug no HTML
+        // 💉 Injeta o slug
         html = html.replace(
           "</head>",
           `<script>window.STORE_SLUG="${domain.slug}";</script>\n</head>`
+        );
+
+        // 🔧 Reescreve assets absolutos para relativos
+        html = html.replaceAll(
+          /https:\/\/catalogovirtual\.app\.br\/assets\//g,
+          "/assets/"
+        );
+        html = html.replaceAll(
+          /https:\/\/catalogovirtual\.app\.br\/~flock\.js/g,
+          "/~flock.js"
         );
 
         res.writeHead(200, {
