@@ -1,7 +1,6 @@
 import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import fetch from "node-fetch";
-import zlib from "zlib";
 
 const app = express();
 
@@ -15,13 +14,13 @@ const CONFIG = {
   EDGE_FUNCTION:
     "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/get-domain",
   ORIGIN: "https://catalogovirtual.app.br",
-  CACHE_TTL: 1000 * 60 * 10, // 10 minutos
+  CACHE_TTL: 1000 * 60 * 10,
   TIMEOUT: 7000,
   PORT: process.env.PORT || 8080,
 };
 
 /* ======================================================
-   🌐 LIBERA CORS GLOBALMENTE
+   🌐 CORS GLOBAL
 ====================================================== */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -52,16 +51,13 @@ function getCache(host) {
 ====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
+
   const cached = getCache(host);
   if (cached) return cached;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), CONFIG.TIMEOUT);
 
   try {
     const edge = await fetch(`${CONFIG.EDGE_FUNCTION}?domain=${host}`, {
       headers: { Authorization: `Bearer ${CONFIG.SUPABASE_KEY}` },
-      signal: controller.signal,
     });
 
     if (edge.ok) {
@@ -72,7 +68,7 @@ async function getDomainData(host) {
       }
     }
 
-    // fallback direto no Supabase REST
+    // fallback direto REST
     const res = await fetch(
       `${CONFIG.SUPABASE_URL}/rest/v1/custom_domains?domain=eq.${host}&select=slug,status`,
       {
@@ -80,10 +76,8 @@ async function getDomainData(host) {
           apikey: CONFIG.SUPABASE_KEY,
           Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
         },
-        signal: controller.signal,
       }
     );
-    clearTimeout(timeout);
 
     if (res.ok) {
       const data = await res.json();
@@ -94,7 +88,7 @@ async function getDomainData(host) {
       }
     }
   } catch (err) {
-    console.error("⚠️ Erro Supabase:", err.message);
+    console.error("⚠️ Erro ao buscar domínio:", err.message);
   }
 
   return null;
@@ -115,7 +109,7 @@ const STATIC_PATHS = [
 const isStatic = (path) => STATIC_PATHS.some((rx) => rx.test(path));
 
 /* ======================================================
-   🧭 MIDDLEWARE PRINCIPAL (PROXY)
+   🧭 PROXY PRINCIPAL (rota /s/slug)
 ====================================================== */
 app.use(async (req, res, next) => {
   const originalHost = req.headers.host?.trim().toLowerCase() || "";
@@ -138,85 +132,28 @@ app.use(async (req, res, next) => {
     `);
   }
 
+  // ✅ Sempre força o slug dentro de /s/
   const target = CONFIG.ORIGIN;
-  let rewrittenPath = path;
- 
-rewrittenPath = `/s/${domainData.slug}${path}`;
-
+  const rewrittenPath = `/s/${domainData.slug}${path}`;
 
   console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}${rewrittenPath}`);
 
-  const proxy = createProxyMiddleware({
+  return createProxyMiddleware({
     target,
     changeOrigin: true,
     secure: true,
     xfwd: true,
-    selfHandleResponse: true,
     pathRewrite: () => rewrittenPath,
-
-    /* ======================================================
-       🧩 TRATAMENTO DE RESPOSTA
-    ======================================================= */
-    onProxyRes(proxyRes, req, res) {
-      const chunks = [];
-      proxyRes.on("data", (chunk) => chunks.push(chunk));
-      proxyRes.on("end", async () => {
-        let buffer = Buffer.concat(chunks);
-        const contentType = proxyRes.headers["content-type"] || "";
-
-        // ✅ 1. Se não for HTML, devolve direto
-        if (!contentType.includes("text/html")) {
-          res.writeHead(proxyRes.statusCode, proxyRes.headers);
-          return res.end(buffer);
-        }
-
-        // ✅ 2. Decodifica HTML (gzip/br)
-        try {
-          const enc = proxyRes.headers["content-encoding"];
-          if (enc === "gzip") buffer = zlib.gunzipSync(buffer);
-          else if (enc === "br") buffer = zlib.brotliDecompressSync(buffer);
-        } catch {}
-
-        let html = buffer.toString("utf8");
-
-        // ✅ 3. SPA Fallback: se 404 ou sem root, busca index.html
-        if (proxyRes.statusCode === 404 || !html.includes("<div id=\"root\"")) {
-          try {
-            const fallback = await fetch(`${CONFIG.ORIGIN}/s/${domainData.slug}/index.html`);
-            html = await fallback.text();
-            console.log("🔁 SPA fallback ativado:", req.path);
-          } catch (e) {
-            console.error("❌ Falha ao carregar fallback index.html:", e.message);
-          }
-        }
-
-        // ✅ 4. Injeta slug e ajusta URLs
-        html = html
-          .replace("</head>", `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`)
-          .replaceAll("https://catalogovirtual.app.br/assets/", "/assets/")
-          .replaceAll("https://catalogovirtual.app.br/~flock.js", "/~flock.js");
-
-        // ✅ 5. Remove compressão duplicada
-        const headers = { ...proxyRes.headers };
-        delete headers["content-encoding"];
-        delete headers["content-length"];
-
-        res.writeHead(200, {
-          ...headers,
-          "Access-Control-Allow-Origin": "*",
-          "Content-Encoding": "identity",
-        });
-        res.end(html);
-      });
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "X-Forwarded-Host": originalHost,
+      "X-Forwarded-Proto": "https",
     },
-
     onError(err, req, res) {
       console.error("❌ ProxyError", err.message);
       res.status(502).send(`<h2>Erro 502</h2><p>${err.message}</p>`);
     },
-  });
-
-  proxy(req, res, next);
+  })(req, res, next);
 });
 
 /* ======================================================
