@@ -11,9 +11,8 @@ const app = express();
 const CONFIG = {
   SUPABASE_URL: "https://hbpekfnexdtnbahmmufm.supabase.co",
   SUPABASE_KEY:
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9zZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
-  EDGE_FUNCTION:
-    "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/get-domain",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhicGVrZm5leGR0bmJhaG1tdWZtIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1ODk4NTUxNywiZXhwIjoyMDc0NTYxNTE3fQ.cMiKA-_TqdgCNcuMzbu3qTRjiTPHZWH-dwVeEQ8lTtA",
+  EDGE_FUNCTION: "https://hbpekfnexdtnbahmmufm.supabase.co/functions/v1/get-domain",
   ORIGIN: "https://catalogovirtual.app.br",
   CACHE_TTL: 1000 * 60 * 10, // 10 minutos
   TIMEOUT: 7000,
@@ -25,14 +24,8 @@ const CONFIG = {
 ====================================================== */
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET, POST, OPTIONS, PUT, DELETE"
-  );
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Requested-With"
-  );
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE");
+  res.setHeader("Access-Control-Allow-Headers", "*");
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
@@ -54,7 +47,7 @@ function getCache(host) {
 }
 
 /* ======================================================
-   🛰️ BUSCA DOMÍNIO NO SUPABASE (Edge Function)
+   🛰️ BUSCA DOMÍNIO VIA EDGE FUNCTION
 ====================================================== */
 async function getDomainData(host) {
   if (!host) return null;
@@ -66,9 +59,7 @@ async function getDomainData(host) {
 
   try {
     const edge = await fetch(`${CONFIG.EDGE_FUNCTION}?domain=${host}`, {
-      headers: {
-        Authorization: `Bearer ${CONFIG.SUPABASE_KEY}`,
-      },
+      headers: { Authorization: `Bearer ${CONFIG.SUPABASE_KEY}` },
       signal: controller.signal,
     });
 
@@ -84,14 +75,14 @@ async function getDomainData(host) {
       console.warn(`⚠️ Edge Function falhou: ${edge.status}`);
     }
   } catch (err) {
-    console.error(`⚠️ Erro Supabase: ${err.message}`);
+    console.error(`⚠️ Erro ao buscar domínio via Edge: ${err.message}`);
   }
 
   return null;
 }
 
 /* ======================================================
-   🚦 ROTAS ESTÁTICAS
+   🚦 MAPEAMENTO DE ROTAS ESTÁTICAS
 ====================================================== */
 const STATIC_PATHS = [
   /^\/assets\//,
@@ -129,83 +120,74 @@ app.use(async (req, res, next) => {
     `);
   }
 
-  // 🔧 Define destino (origem Lovable)
-  const target = isStatic(path)
-    ? CONFIG.ORIGIN
-    : `${CONFIG.ORIGIN}/s/${domainData.slug}`;
+  // ⚡ Reescreve rotas (assets, API e HTML)
+  const target = CONFIG.ORIGIN;
+  const injectSlug = !isStatic(path) && !path.startsWith("/~");
 
-  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}`);
+  console.log(`➡️ Proxy: ${cleanHost}${path} → ${target}${path}`);
 
   return createProxyMiddleware({
     target,
     changeOrigin: true,
     secure: true,
     xfwd: true,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "*",
-      "X-Forwarded-Host": originalHost,
-      "X-Forwarded-Proto": "https",
-      "User-Agent": req.headers["user-agent"] || "CatalogoProxy",
-    },
+    selfHandleResponse: injectSlug,
+    pathRewrite: (p) =>
+      isStatic(p) || p.startsWith("/~") ? p : `/s/${domainData.slug}${p}`,
 
-    onProxyRes(proxyRes, req, res) {
-      const enc = proxyRes.headers["content-encoding"];
-      const chunks = [];
+    onProxyRes: injectSlug
+      ? async (proxyRes, req, res) => {
+          const enc = proxyRes.headers["content-encoding"];
+          const chunks = [];
 
-      proxyRes.on("data", (chunk) => chunks.push(chunk));
-      proxyRes.on("end", () => {
-        let buffer = Buffer.concat(chunks);
-        const contentType = proxyRes.headers["content-type"] || "";
+          proxyRes.on("data", (chunk) => chunks.push(chunk));
+          proxyRes.on("end", () => {
+            try {
+              let buffer = Buffer.concat(chunks);
+              const contentType = proxyRes.headers["content-type"] || "";
 
-        delete proxyRes.headers["content-encoding"];
-        delete proxyRes.headers["content-length"];
+              delete proxyRes.headers["content-encoding"];
+              delete proxyRes.headers["content-length"];
 
-        if (enc === "gzip") buffer = zlib.gunzipSync(buffer);
-        else if (enc === "br") buffer = zlib.brotliDecompressSync(buffer);
+              if (enc === "gzip") buffer = zlib.gunzipSync(buffer);
+              else if (enc === "br") buffer = zlib.brotliDecompressSync(buffer);
 
-        if (contentType.includes("text/html")) {
-          let html = buffer.toString("utf8");
+              if (contentType.includes("text/html")) {
+                let html = buffer.toString("utf8");
 
-          // ✅ Injeta script de redirecionamento automático
-          html = html.replace(
-            "</head>",
-            `<script>
-              (function() {
-                const slug = "${domainData.slug}";
-                const pathname = window.location.pathname;
-                if (!pathname.startsWith('/s/' + slug)) {
-                  if (!pathname.startsWith('/assets') && !pathname.startsWith('/~') && pathname !== '/favicon.ico') {
-                    const novaUrl = '/s/' + slug + pathname;
-                    console.log('🔁 Redirecionando automaticamente para:', novaUrl);
-                    window.location.replace(novaUrl);
-                  }
-                }
-              })();
-            </script>\n</head>`
-          );
+                // 🧩 Corrige URLs absolutas → relativas (para evitar CORS)
+                html = html
+                  .replace(/https:\/\/catalogovirtual\.app\.br\/assets\//g, "/assets/")
+                  .replace(/https:\/\/catalogovirtual\.app\.br\/~flock\.js/g, "/~flock.js")
+                  .replace(/https:\/\/catalogovirtual\.app\.br\/~api\//g, "/~api/")
+                  .replace("</head>", `<script>window.STORE_SLUG="${domainData.slug}";</script>\n</head>`);
 
-          res.writeHead(proxyRes.statusCode, {
-            ...proxyRes.headers,
-            "Access-Control-Allow-Origin": "*",
+                res.writeHead(proxyRes.statusCode, {
+                  ...proxyRes.headers,
+                  "Access-Control-Allow-Origin": "*",
+                });
+                res.end(html);
+              } else {
+                res.writeHead(proxyRes.statusCode, {
+                  ...proxyRes.headers,
+                  "Access-Control-Allow-Origin": "*",
+                });
+                res.end(buffer);
+              }
+            } catch (e) {
+              console.error("⚠️ Falha ao processar HTML:", e.message);
+              res.writeHead(500, { "Content-Type": "text/plain" });
+              res.end("Erro ao processar resposta");
+            }
           });
-          res.end(html);
-        } else {
-          res.writeHead(proxyRes.statusCode, {
-            ...proxyRes.headers,
-            "Access-Control-Allow-Origin": "*",
-          });
-          res.end(buffer);
         }
-      });
-    },
+      : (proxyRes) => {
+          proxyRes.headers["Access-Control-Allow-Origin"] = "*";
+        },
 
     onError(err, req, res) {
       console.error("❌ ProxyError", err.message);
-      res
-        .status(502)
-        .send(`<h2>Erro 502</h2><p>${err.message}</p>`);
+      res.status(502).send(`<h2>Erro 502</h2><p>${err.message}</p>`);
     },
   })(req, res, next);
 });
